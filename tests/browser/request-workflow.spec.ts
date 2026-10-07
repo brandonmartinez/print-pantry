@@ -63,7 +63,9 @@ async function rescan(context: BrowserContext) {
   const before = await (await context.request.get('/api/catalog/status')).json() as {
     scan: { lastScan?: { id: string } };
   };
-  const trigger = await context.request.post('/api/catalog/rescan');
+  const trigger = await context.request.post('/api/catalog/rescan', {
+    headers: { Origin: new URL(baseURL!).origin },
+  });
   expect(trigger.status()).toBe(202);
   await expect.poll(async () => {
     const result = await (await context.request.get('/api/catalog/status')).json() as {

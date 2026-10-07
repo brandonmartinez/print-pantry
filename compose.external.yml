@@ -1,0 +1,6 @@
+services:
+  db:
+    profiles: [internal]
+  api:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set a dedicated external Print Pantry database URL}

@@ -7,13 +7,26 @@ import { registerRequests } from './requests.js';
 export function buildServer(
   pool: { query(sql: string): Promise<unknown> },
   catalog?: CatalogOptions & { secureCookie: boolean },
+  publicOrigin?: string,
 ) {
   const server = Fastify({ logger: true });
+
+  if (publicOrigin) {
+    const host = new URL(publicOrigin).host;
+    server.addHook('onRequest', async (request, reply) => {
+      if (request.method === 'GET' || request.method === 'HEAD' || request.method === 'OPTIONS') return;
+      if (request.headers.origin !== publicOrigin || request.headers.host !== host) {
+        return reply.code(403).send({ error: 'Request origin or host is not allowed' });
+      }
+    });
+  }
 
   server.get<{ Reply: HealthResponse }>('/health', async () => ({ status: 'ok' }));
   server.get<{ Reply: ReadinessResponse }>('/ready', async (_request, reply) => {
     try {
-      await pool.query('SELECT 1');
+      await pool.query(publicOrigin
+        ? 'SELECT 1 FROM users, print_requests, request_queue_state LIMIT 1'
+        : 'SELECT 1');
       return { status: 'ready' };
     } catch (error) {
       server.log.error({ err: error }, 'Database readiness check failed');

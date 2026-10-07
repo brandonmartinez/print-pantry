@@ -12,6 +12,19 @@ const pool = createPool(url);
 afterAll(async () => pool.end());
 
 describe('versioned PostgreSQL migrations', () => {
+  it('refuses unrelated schemas before writing migration state', async () => {
+    await pool.query('CREATE SCHEMA pgarchive');
+    try {
+      await expect(runMigrations(url)).rejects.toThrow('dedicated Print Pantry database');
+      const result = await pool.query(
+        "SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = 'pgarchive'",
+      );
+      expect(result.rows[0].count).toBe(1);
+    } finally {
+      await pool.query('DROP SCHEMA pgarchive');
+    }
+  });
+
   it('applies idempotently and supports typed reads and writes', async () => {
     await runMigrations(url);
     await runMigrations(url);
