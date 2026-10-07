@@ -92,6 +92,20 @@ const printRequest = {
     downloadUrl: '/api/catalog/assets/asset-2/download',
   }],
 };
+const printRequestDetail = {
+  ...printRequest,
+  history: [{
+    id: 'history-1',
+    actor: { id: 'operator-1', username: 'operator', role: 'operator' },
+    action: 'approve',
+    fromStatus: 'requested',
+    toStatus: 'queued',
+    fromPosition: null,
+    toPosition: 1,
+    note: 'Ready for the next batch.',
+    createdAt: '2026-10-03T10:00:00.000Z',
+  }],
+};
 const queuedRequests = [
   { ...printRequest, id: 'queue-1', status: 'queued', projectName: 'Desk Organizer' },
   { ...printRequest, id: 'queue-2', status: 'queued', projectName: 'Reading Lamp' },
@@ -146,6 +160,7 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
       return jsonResponse({ items: queuedRequests, revision: 4, selectedNextId: 'queue-1' });
     }
     if (path === '/api/requests/queue/next' && method === 'POST') return jsonResponse({ items: queuedRequests, revision: 5, selectedNextId: 'queue-2' });
+    if (path === '/api/requests/request-1' && method === 'GET') return jsonResponse({ request: printRequestDetail });
     if (path.startsWith('/api/requests/') && method === 'PATCH') return jsonResponse({ request: printRequest, revision: 5 });
     return jsonResponse({ message: `Unexpected API request: ${method} ${path}` }, 404);
   });
@@ -322,6 +337,16 @@ it('shows requester history and permits cancellation before printing', async () 
     const cancellation = calls.find(({ path, init }) => path === '/api/requests/request-1' && init?.method === 'PATCH');
     expect(JSON.parse(String(cancellation?.init?.body))).toEqual({ action: 'cancel' });
   });
+});
+
+it('loads detail-only request history when its disclosure opens', async () => {
+  const { calls } = await signIn('requester');
+  fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+  await screen.findByRole('heading', { name: 'Your requests' });
+  fireEvent.click(screen.getByText('Request history', { selector: 'summary' }));
+  expect(await screen.findByText('by operator')).toBeTruthy();
+  expect(screen.getByText('Ready for the next batch.')).toBeTruthy();
+  expect(calls.some(({ path, init }) => path === '/api/requests/request-1' && (init?.method || 'GET') === 'GET')).toBe(true);
 });
 
 it('refreshes an operator queue after a stale reorder conflict', async () => {

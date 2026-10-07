@@ -690,18 +690,38 @@ function RequestCard({
 }) {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyRequest, setHistoryRequest] = useState<PrintRequest | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
   const status = request.status.toLowerCase();
   const canCancel = !isOperator && (status === 'requested' || status === 'queued');
   const canReview = isOperator && status === 'requested';
   const canStart = isOperator && status === 'queued' && selectedNextId === request.id;
   const canComplete = isOperator && status === 'printing';
   const requestDate = formatDate(request.createdAt || request.updatedAt);
+  const history = historyRequest?.history ?? request.history ?? [];
+
+  async function loadHistory() {
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      const result = await apiRequest<RequestResponse>(`/api/requests/${encodeURIComponent(request.id)}`);
+      setHistoryRequest(result.request);
+    } catch (reason) {
+      setHistoryError(`Could not load request history: ${errorMessage(reason)}`);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
 
   async function act(action: 'approve' | 'decline' | 'cancel' | 'start' | 'complete') {
     setBusy(true);
     try {
       await onAction(request, action, note.trim() || undefined);
       setNote('');
+      setHistoryRequest(null);
+      if (historyOpen) await loadHistory();
     } finally {
       setBusy(false);
     }
@@ -736,7 +756,7 @@ function RequestCard({
       {(request.sourceUnavailable || request.selected.some((selection) => selection.available === false)) && (
         <p className="source-warning" role="status">{request.selected.find((selection) => selection.unavailableReason)?.unavailableReason || 'One or more requested source files are no longer available.'}</p>
       )}
-      {isOperator && (canReview || status === 'queued') && (
+      {isOperator && (canReview || status === 'queued' || status === 'printing') && (
         <label className="operator-note">Operator note
           <input disabled={busy} maxLength={1000} onChange={(event) => setNote(event.target.value)} placeholder="Optional note for this request" value={note} />
         </label>
@@ -751,19 +771,24 @@ function RequestCard({
         {canStart && <button className="button button-primary" disabled={busy} onClick={() => void act('start')} type="button">Mark printing</button>}
         {canComplete && <button className="button button-primary" disabled={busy} onClick={() => void act('complete')} type="button">Mark completed</button>}
       </div>
-      {request.history && request.history.length > 0 && (
-        <details className="request-history">
+      <details className="request-history" onToggle={(event) => {
+        const open = event.currentTarget.open;
+        setHistoryOpen(open);
+        if (open && !historyRequest && !historyLoading) void loadHistory();
+      }}>
           <summary>Request history</summary>
-          <ol>
-            {request.history.map((entry, index) => <li key={`${entry.createdAt || entry.updatedAt || index}-${entry.action || entry.status || ''}`}>
+          {historyLoading && <p role="status">Loading request history…</p>}
+          {historyError && <p role="alert">{historyError} <button className="text-button" onClick={() => void loadHistory()} type="button">Retry history</button></p>}
+          {!historyLoading && !historyError && history && history.length > 0 && <ol>
+            {history.map((entry, index) => <li key={`${entry.createdAt || entry.updatedAt || index}-${entry.action || entry.status || ''}`}>
               <strong>{requestStatusLabel(entry.toStatus || entry.status || entry.action || 'Updated')}</strong>
               {(entry.actorName || entry.actorUsername || entry.actor?.username) && <span> by {entry.actorName || entry.actorUsername || entry.actor?.username}</span>}
               {(formatDate(entry.createdAt || entry.updatedAt)) && <time> · {formatDate(entry.createdAt || entry.updatedAt)}</time>}
               {entry.note && <p>{entry.note}</p>}
             </li>)}
-          </ol>
+          </ol>}
+          {!historyLoading && !historyError && history.length === 0 && <p>No history has been recorded yet.</p>}
         </details>
-      )}
     </article>
   );
 }
