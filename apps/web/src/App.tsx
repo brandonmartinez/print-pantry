@@ -6,6 +6,46 @@ type Scan = {
   lastSuccessfulAt?: string | null;
   lastError?: string | null;
 };
+type RequestStatus = 'requested' | 'queued' | 'printing' | 'completed' | 'declined' | 'canceled' | string;
+type RequestSelection = {
+  assetId: string;
+  versionId: string | null;
+  name?: string | null;
+  relativePath?: string | null;
+  variant?: string | null;
+  available?: boolean;
+  unavailableReason?: string | null;
+  downloadUrl?: string | null;
+};
+type RequestHistoryEntry = {
+  action?: string;
+  status?: RequestStatus;
+  toStatus?: RequestStatus | null;
+  note?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  actorName?: string | null;
+  actorUsername?: string | null;
+  actor?: { username?: string | null } | null;
+};
+type PrintRequest = {
+  id: string;
+  projectId: string;
+  projectName?: string | null;
+  status: RequestStatus;
+  selected: RequestSelection[];
+  quantity: number;
+  material?: string | null;
+  color?: string | null;
+  notes?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  sourceUnavailable?: boolean;
+  history?: RequestHistoryEntry[];
+};
+type RequestsResponse = { items: PrintRequest[] };
+type RequestResponse = { request: PrintRequest };
+type QueueResponse = { items: PrintRequest[]; revision: number; selectedNextId?: string | null };
 type Project = {
   id: string;
   name: string;
@@ -112,6 +152,18 @@ function formatDate(value?: string | null): string | undefined {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return undefined;
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function requestStatusLabel(status: RequestStatus): string {
+  const labels: Record<string, string> = {
+    requested: 'Requested',
+    queued: 'Queued',
+    printing: 'Printing',
+    completed: 'Completed',
+    declined: 'Declined',
+    canceled: 'Canceled',
+  };
+  return labels[status] || status;
 }
 
 function isPoint3D(value: unknown): value is Point3D {
@@ -510,6 +562,362 @@ function MetadataEditor({
   );
 }
 
+function RequestForm({ project }: { project: ProjectResponse['project'] }) {
+  const selectableFiles = project.files.filter((file) => file.available && file.versionId);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [quantity, setQuantity] = useState('1');
+  const [material, setMaterial] = useState('');
+  const [color, setColor] = useState('');
+  const [notes, setNotes] = useState('');
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  function toggleFile(fileId: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(fileId)) next.delete(fileId);
+      else next.add(fileId);
+      return next;
+    });
+  }
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedQuantity = Number(quantity);
+    if (selectedIds.size === 0) {
+      setError('Select at least one available file and version for this print.');
+      return;
+    }
+    if (!Number.isInteger(parsedQuantity) || parsedQuantity < 1 || parsedQuantity > 100) {
+      setError('Quantity must be a whole number from 1 to 100.');
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const selected = selectableFiles
+        .filter((file) => selectedIds.has(file.id))
+        .map((file) => ({ assetId: file.id, versionId: file.versionId! }));
+      const result = await apiRequest<RequestResponse>('/api/requests', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: project.id,
+          selected,
+          quantity: parsedQuantity,
+          ...(material.trim() ? { material: material.trim() } : {}),
+          ...(color.trim() ? { color: color.trim() } : {}),
+          ...(notes.trim() ? { notes: notes.trim() } : {}),
+        }),
+      });
+      setMessage(`Request ${result.request.id} submitted. You can follow it in Requests.`);
+      setSelectedIds(new Set());
+      setQuantity('1');
+      setMaterial('');
+      setColor('');
+      setNotes('');
+    } catch (reason) {
+      setError(`Could not submit this request: ${errorMessage(reason)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="request-form-card" aria-labelledby="request-heading">
+      <div>
+        <p className="eyebrow">Ready when you are</p>
+        <h2 id="request-heading">Request this print</h2>
+        <p className="quiet">Choose every file and variant needed. Files are never combined automatically.</p>
+      </div>
+      {selectableFiles.length === 0 ? (
+        <p className="notice notice-error" role="status">No available file versions can be requested right now.</p>
+      ) : (
+        <form className="request-form" onSubmit={submit}>
+          <fieldset>
+            <legend>Files and variants <span aria-hidden="true">*</span></legend>
+            <p className="field-hint">Select one or more available versions for this request.</p>
+            <div className="request-file-options">
+              {project.files.map((file) => {
+                const selectable = file.available && Boolean(file.versionId);
+                const selectionLabel = `${file.name}${file.variant ? ` (${file.variant})` : ''}`;
+                return (
+                  <label className={`request-file-option ${selectable ? '' : 'request-file-option-disabled'}`} key={file.id}>
+                    <input
+                      checked={selectedIds.has(file.id)}
+                      disabled={!selectable || busy}
+                      onChange={() => toggleFile(file.id)}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{selectionLabel}</strong>
+                      <small>{file.relativePath} · {selectable ? 'Current version available' : file.available ? 'No requestable version' : 'Source unavailable'}</small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+          <div className="request-fields">
+            <label>Quantity <input aria-describedby="quantity-hint" inputMode="numeric" max={100} min={1} onChange={(event) => setQuantity(event.target.value)} required step={1} type="number" value={quantity} /></label>
+            <p className="field-hint" id="quantity-hint">Whole number from 1 to 100.</p>
+            <label>Material <input maxLength={80} onChange={(event) => setMaterial(event.target.value)} placeholder="Optional, e.g. PLA" value={material} /></label>
+            <label>Color <input maxLength={80} onChange={(event) => setColor(event.target.value)} placeholder="Optional, e.g. sage green" value={color} /></label>
+            <label className="request-notes">Notes <textarea maxLength={1000} onChange={(event) => setNotes(event.target.value)} placeholder="Optional fit, finish, or timing details" rows={3} value={notes} /></label>
+          </div>
+          {(error || message) && <p className={`notice ${error ? 'notice-error' : 'notice-success'}`} role={error ? 'alert' : 'status'}>{error || message}</p>}
+          <button className="button button-primary" disabled={busy} type="submit">{busy ? 'Submitting…' : 'Submit print request'}</button>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function RequestCard({
+  request,
+  isOperator,
+  selectedNextId,
+  onAction,
+  onSelectNext,
+}: {
+  request: PrintRequest;
+  isOperator: boolean;
+  selectedNextId?: string | null;
+  onAction: (request: PrintRequest, action: 'approve' | 'decline' | 'cancel' | 'start' | 'complete', note?: string) => Promise<void>;
+  onSelectNext: (requestId: string) => Promise<void>;
+}) {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const status = request.status.toLowerCase();
+  const canCancel = !isOperator && (status === 'requested' || status === 'queued');
+  const canReview = isOperator && status === 'requested';
+  const canStart = isOperator && status === 'queued' && selectedNextId === request.id;
+  const canComplete = isOperator && status === 'printing';
+  const requestDate = formatDate(request.createdAt || request.updatedAt);
+
+  async function act(action: 'approve' | 'decline' | 'cancel' | 'start' | 'complete') {
+    setBusy(true);
+    try {
+      await onAction(request, action, note.trim() || undefined);
+      setNote('');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <article className="request-card">
+      <div className="request-card-header">
+        <div>
+          <p className="eyebrow">{request.projectName || 'Project request'}</p>
+          <h3>Request {request.id}</h3>
+          {requestDate && <p className="quiet request-date">Submitted {requestDate}</p>}
+        </div>
+        <span className={`request-status status-${status}`}>{requestStatusLabel(request.status)}</span>
+      </div>
+      <dl className="request-summary">
+        <div><dt>Files</dt><dd>{request.selected.length === 0 ? 'No source snapshot available' : request.selected.map((selection) => selection.relativePath || selection.name || selection.assetId).join(', ')}</dd></div>
+        <div><dt>Quantity</dt><dd>{request.quantity}</dd></div>
+        {request.material && <div><dt>Material</dt><dd>{request.material}</dd></div>}
+        {request.color && <div><dt>Color</dt><dd>{request.color}</dd></div>}
+        {request.notes && <div><dt>Notes</dt><dd className="notes-text">{request.notes}</dd></div>}
+      </dl>
+      {request.selected.length > 0 && <ul className="request-source-list" aria-label="Requested source snapshots">
+        {request.selected.map((selection) => {
+          const downloadUrl = safeSameOriginUrl(selection.downloadUrl);
+          return <li key={`${selection.assetId}-${selection.versionId}`}>
+            <span>{selection.name || selection.relativePath || selection.assetId}{selection.variant ? ` · ${selection.variant}` : ''}</span>
+            {downloadUrl ? <a href={downloadUrl} download>Download version</a> : <small>Exact version unavailable</small>}
+          </li>;
+        })}
+      </ul>}
+      {(request.sourceUnavailable || request.selected.some((selection) => selection.available === false)) && (
+        <p className="source-warning" role="status">{request.selected.find((selection) => selection.unavailableReason)?.unavailableReason || 'One or more requested source files are no longer available.'}</p>
+      )}
+      {isOperator && (canReview || status === 'queued') && (
+        <label className="operator-note">Operator note
+          <input disabled={busy} maxLength={1000} onChange={(event) => setNote(event.target.value)} placeholder="Optional note for this request" value={note} />
+        </label>
+      )}
+      <div className="request-actions">
+        {canCancel && <button className="button button-outline" disabled={busy} onClick={() => void act('cancel')} type="button">Cancel request</button>}
+        {canReview && <>
+          <button className="button button-primary" disabled={busy} onClick={() => void act('approve')} type="button">Approve and queue</button>
+          <button className="button button-outline" disabled={busy} onClick={() => void act('decline')} type="button">Decline</button>
+        </>}
+        {isOperator && status === 'queued' && selectedNextId !== request.id && <button className="button button-outline" disabled={busy} onClick={() => void onSelectNext(request.id)} type="button">Choose next</button>}
+        {canStart && <button className="button button-primary" disabled={busy} onClick={() => void act('start')} type="button">Mark printing</button>}
+        {canComplete && <button className="button button-primary" disabled={busy} onClick={() => void act('complete')} type="button">Mark completed</button>}
+      </div>
+      {request.history && request.history.length > 0 && (
+        <details className="request-history">
+          <summary>Request history</summary>
+          <ol>
+            {request.history.map((entry, index) => <li key={`${entry.createdAt || entry.updatedAt || index}-${entry.action || entry.status || ''}`}>
+              <strong>{requestStatusLabel(entry.toStatus || entry.status || entry.action || 'Updated')}</strong>
+              {(entry.actorName || entry.actorUsername || entry.actor?.username) && <span> by {entry.actorName || entry.actorUsername || entry.actor?.username}</span>}
+              {(formatDate(entry.createdAt || entry.updatedAt)) && <time> · {formatDate(entry.createdAt || entry.updatedAt)}</time>}
+              {entry.note && <p>{entry.note}</p>}
+            </li>)}
+          </ol>
+        </details>
+      )}
+    </article>
+  );
+}
+
+function RequestsPage({ user }: { user: User }) {
+  const isOperator = user.role === 'operator';
+  const [requests, setRequests] = useState<PrintRequest[]>([]);
+  const [queue, setQueue] = useState<PrintRequest[]>([]);
+  const [revision, setRevision] = useState<number>();
+  const [selectedNextId, setSelectedNextId] = useState<string | null>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [refresh, setRefresh] = useState(0);
+  const [queueDirty, setQueueDirty] = useState(false);
+  const [queueBusy, setQueueBusy] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    setError('');
+    try {
+      const requestsResult = await apiRequest<RequestsResponse>('/api/requests');
+      setRequests(requestsResult.items);
+      if (isOperator) {
+        const queueResult = await apiRequest<QueueResponse>('/api/requests/queue');
+        setQueue(queueResult.items);
+        setRevision(queueResult.revision);
+        setSelectedNextId(queueResult.selectedNextId ?? null);
+        setQueueDirty(false);
+      }
+    } catch (reason) {
+      setError(`Could not load requests: ${errorMessage(reason)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, [isOperator, refresh]);
+
+  async function refreshAfterConflict() {
+    setMessage('The queue changed elsewhere, so the latest queue has been loaded.');
+    setRefresh((value) => value + 1);
+  }
+
+  async function performAction(request: PrintRequest, action: 'approve' | 'decline' | 'cancel' | 'start' | 'complete', note?: string) {
+    setError('');
+    setMessage('');
+    try {
+      await apiRequest<RequestResponse>(`/api/requests/${encodeURIComponent(request.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          action,
+          ...(note ? { note } : {}),
+          ...(revision !== undefined && action !== 'cancel' ? { expectedRevision: revision } : {}),
+        }),
+      });
+      setMessage(`Request ${request.id} ${action === 'approve' ? 'approved and queued' : `${action}d`}.`);
+      setRefresh((value) => value + 1);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 409) {
+        await refreshAfterConflict();
+        return;
+      }
+      setError(`Could not update request: ${errorMessage(reason)}`);
+    }
+  }
+
+  async function chooseNext(requestId: string) {
+    if (revision === undefined) return;
+    setQueueBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await apiRequest<QueueResponse>('/api/requests/queue/next', {
+        method: 'POST',
+        body: JSON.stringify({ requestId, expectedRevision: revision }),
+      });
+      setQueue(result.items);
+      setRevision(result.revision);
+      setSelectedNextId(result.selectedNextId ?? requestId);
+      setMessage('Next print updated.');
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 409) await refreshAfterConflict();
+      else setError(`Could not choose the next print: ${errorMessage(reason)}`);
+    } finally {
+      setQueueBusy(false);
+    }
+  }
+
+  function moveQueueItem(index: number, direction: -1 | 1) {
+    const destination = index + direction;
+    if (destination < 0 || destination >= queue.length) return;
+    setQueue((current) => {
+      const next = [...current];
+      [next[index], next[destination]] = [next[destination], next[index]];
+      return next;
+    });
+    setQueueDirty(true);
+  }
+
+  async function saveQueueOrder() {
+    if (revision === undefined) return;
+    setQueueBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await apiRequest<QueueResponse>('/api/requests/queue', {
+        method: 'PUT',
+        body: JSON.stringify({ orderedIds: queue.map((request) => request.id), expectedRevision: revision }),
+      });
+      setQueue(result.items);
+      setRevision(result.revision);
+      setSelectedNextId(result.selectedNextId ?? null);
+      setQueueDirty(false);
+      setMessage('Queue order saved.');
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 409) await refreshAfterConflict();
+      else setError(`Could not reorder the queue: ${errorMessage(reason)}`);
+    } finally {
+      setQueueBusy(false);
+    }
+  }
+
+  if (loading) return <section className="requests-state" aria-live="polite"><span className="spinner" />Loading requests…</section>;
+  if (error && requests.length === 0) return <section className="requests-state"><p className="notice notice-error" role="alert">{error}</p><button className="button button-outline" onClick={() => setRefresh((value) => value + 1)} type="button">Try again</button></section>;
+
+  return (
+    <main className="content-wrap requests-page">
+      <section className="requests-heading">
+        <div><p className="eyebrow">{isOperator ? 'Operator workspace' : 'Your print plans'}</p><h1>{isOperator ? 'Print queue' : 'Your requests'}</h1><p>{isOperator ? 'Review requests, set the queue order, and record each print’s progress.' : 'Follow your print requests from submission through completion.'}</p></div>
+        <button className="button button-outline" disabled={queueBusy} onClick={() => setRefresh((value) => value + 1)} type="button">Refresh</button>
+      </section>
+      {(error || message) && <p className={`notice ${error ? 'notice-error' : 'notice-success'}`} role={error ? 'alert' : 'status'}>{error || message}</p>}
+      {isOperator && <section className="queue-panel" aria-labelledby="queue-heading">
+        <div className="section-heading"><div><p className="eyebrow">Current work</p><h2 id="queue-heading">Queue order</h2></div>{queueDirty && <button className="button button-primary" disabled={queueBusy} onClick={() => void saveQueueOrder()} type="button">Save queue order</button>}</div>
+        {queue.length === 0 ? <p className="empty-note">No approved prints are waiting in the queue.</p> : <ol className="queue-list">
+          {queue.map((request, index) => <li key={request.id}>
+            <span className="queue-position">{index + 1}</span>
+            <span className="queue-title"><strong>{request.projectName || request.id}</strong><small>{request.quantity} · {request.selected.map((selection) => selection.name || selection.relativePath || selection.assetId).join(', ')}</small></span>
+            {selectedNextId === request.id && <span className="next-badge">Next</span>}
+            <span className="queue-controls"><button aria-label={`Move ${request.id} earlier`} className="button button-small button-quiet" disabled={queueBusy || index === 0} onClick={() => moveQueueItem(index, -1)} type="button">↑</button><button aria-label={`Move ${request.id} later`} className="button button-small button-quiet" disabled={queueBusy || index === queue.length - 1} onClick={() => moveQueueItem(index, 1)} type="button">↓</button></span>
+          </li>)}
+        </ol>}
+      </section>}
+      <section className="request-list-section" aria-labelledby="all-requests-heading">
+        <div className="section-heading"><div><p className="eyebrow">{isOperator ? 'Household requests' : 'Request history'}</p><h2 id="all-requests-heading">{requests.length} {requests.length === 1 ? 'request' : 'requests'}</h2></div></div>
+        {requests.length === 0 ? <p className="empty-note">{isOperator ? 'New requests will appear here for review.' : 'When you request a print, its progress will appear here.'}</p> : <div className="request-list">{requests.map((request) => <RequestCard key={request.id} isOperator={isOperator} onAction={performAction} onSelectNext={chooseNext} request={request} selectedNextId={selectedNextId} />)}</div>}
+      </section>
+    </main>
+  );
+}
+
 function ProjectDetail({
   projectId,
   user,
@@ -642,6 +1050,7 @@ function ProjectDetail({
               ? <img alt={`Preview of ${project.name}`} src={previewUrl} />
               : <div className="image-placeholder detail-placeholder"><span aria-hidden="true">✳</span><small>No preview image available</small></div>}
           </div>
+          <RequestForm project={project} />
           <section className="files-section" aria-labelledby="files-heading">
             <div className="section-heading">
               <div><p className="eyebrow">The project</p><h2 id="files-heading">Files &amp; variants</h2></div>
@@ -720,6 +1129,7 @@ function App() {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<'library' | 'requests'>('library');
   const [scan, setScan] = useState<Scan>();
   const [rescanBusy, setRescanBusy] = useState(false);
   const [rescanError, setRescanError] = useState('');
@@ -745,7 +1155,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!user || selectedProjectId) return;
+    if (!user || selectedProjectId || activeView !== 'library') return;
     const controller = new AbortController();
     const params = new URLSearchParams({
       q: searchTerm,
@@ -771,7 +1181,7 @@ function App() {
         if (!controller.signal.aborted) setCatalogLoading(false);
       });
     return () => controller.abort();
-  }, [user, selectedProjectId, searchTerm, category, fileType, page, catalogRefresh]);
+  }, [user, selectedProjectId, activeView, searchTerm, category, fileType, page, catalogRefresh]);
 
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil((catalog?.total || 0) / pageSize)),
@@ -803,6 +1213,7 @@ function App() {
       setUser(null);
       setCatalog(null);
       setSelectedProjectId(null);
+      setActiveView('library');
     } catch (reason) {
       setAuthError(`Could not sign out: ${errorMessage(reason)}`);
     } finally {
@@ -842,13 +1253,13 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="/" onClick={(event) => { event.preventDefault(); setSelectedProjectId(null); }} aria-label="Print Pantry home">
+        <a className="brand" href="/" onClick={(event) => { event.preventDefault(); setActiveView('library'); setSelectedProjectId(null); }} aria-label="Print Pantry home">
           <span className="brand-mark" aria-hidden="true">P</span>
           <span>Print Pantry</span>
         </a>
         <nav className="topbar-nav" aria-label="Main navigation">
-          <a className={!selectedProjectId ? 'nav-link active' : 'nav-link'} href="#projects" onClick={(event) => { event.preventDefault(); setSelectedProjectId(null); }}>Library</a>
-          <span className="nav-link nav-muted" aria-disabled="true" title="Print requests are coming soon">Print requests <span className="soon-label">Soon</span></span>
+          <button className={activeView === 'library' ? 'nav-link active' : 'nav-link'} onClick={() => { setActiveView('library'); setSelectedProjectId(null); }} type="button">Library</button>
+          <button className={activeView === 'requests' ? 'nav-link active' : 'nav-link'} onClick={() => { setActiveView('requests'); setSelectedProjectId(null); }} type="button">{user.role === 'operator' ? 'Queue' : 'Requests'}</button>
         </nav>
         <div className="account-menu">
           <span className="user-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
@@ -860,13 +1271,15 @@ function App() {
       {authError && <div className="global-notice notice-error" role="alert">{authError}</div>}
       {connectionError && <div className="global-notice notice-error" role="alert">{connectionError}</div>}
 
-      {selectedProjectId
+      {activeView === 'requests'
+        ? <RequestsPage user={user} />
+        : selectedProjectId
         ? <main className="content-wrap">
           <ProjectDetail
             projectId={selectedProjectId}
             user={user}
             scan={scan}
-            onBack={() => setSelectedProjectId(null)}
+            onBack={() => { setActiveView('library'); setSelectedProjectId(null); }}
           />
         </main>
         : <main className="content-wrap" id="projects">
