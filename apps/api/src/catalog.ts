@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { createPool } from '@print-pantry/db';
 import { clientPath, InvalidLibraryPathError, LibraryUnavailableError, openLibraryFile } from './files.js';
 import { renderStlPreview } from './mesh-preview.js';
+import { validatedImageType } from './image-validation.js';
 import type { createAuth } from './auth.js';
 
 type Pool = ReturnType<typeof createPool>;
@@ -42,7 +43,8 @@ const natural = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base
 const searchableProject = `to_tsvector('simple', coalesce(p.name,'') || ' ' || coalesce(p.description,'') ||
   ' ' || coalesce(array_to_string(p.tags,' '),'') || ' ' || coalesce(p.designer,'') ||
   ' ' || coalesce(p.source_url,'') || ' ' || coalesce(p.license,'') || ' ' ||
-  coalesce(p.notes,'') || ' ' || coalesce(c.relative_path,''))`;
+  coalesce(p.notes,''))`;
+const searchableCategory = `to_tsvector('simple', coalesce(c.name,'') || ' ' || coalesce(c.relative_path,''))`;
 
 function safeSource(source: string | null): string | null {
   if (!source) return null;
@@ -180,6 +182,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       const page = Math.min(Number(request.query.page ?? 1), 100000);
       const pageSize = Math.min(Number(request.query.pageSize ?? 24), 50);
       const where = `($1 = '' OR ${searchableProject} @@ plainto_tsquery('simple', $1)
+        OR ${searchableCategory} @@ plainto_tsquery('simple', $1)
         OR EXISTS (SELECT 1 FROM assets a WHERE a.project_id = p.id AND
           to_tsvector('simple', coalesce(a.name,'') || ' ' || coalesce(a.project_relative_path,''))
           @@ plainto_tsquery('simple', $1)))
@@ -316,7 +319,9 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
         await handle.close();
         return reply.code(409).send({ error: 'File changed since indexing; rescan before downloading' });
       }
-      const filename = asset.name.replace(/["\\\r\n\x00-\x1f]/g, '_');
+      const filename = Array.from(asset.name, (character) =>
+        character === '"' || character === '\\' || character.codePointAt(0)! < 32
+          ? '_' : character).join('');
       const asciiFilename = filename.replace(/[^\x20-\x7e]/g, '_');
       reply.header('Content-Type', 'application/octet-stream');
       reply.header('Content-Disposition', `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
@@ -343,10 +348,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
           if ((await handle.read(bytes, 0, stats.size, 0)).bytesRead !== stats.size) {
             return reply.code(409).send({ error: 'Image changed during preview' });
           }
-          mimeType = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? 'image/png' :
-            bytes.subarray(0, 3).equals(Buffer.from([255, 216, 255])) ? 'image/jpeg' :
-              bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' ? 'image/webp' :
-                bytes.toString('ascii', 0, 6).startsWith('GIF8') ? 'image/gif' : '';
+          mimeType = validatedImageType(bytes) ?? '';
           if (!mimeType) return reply.code(422).send({ error: 'Image content is unsupported or invalid' });
         } else if (asset.extension.toLowerCase() === '.stl') {
           bytes = await renderStlPreview(handle, stats.size);
