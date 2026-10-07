@@ -1,0 +1,27 @@
+{
+  "name": "print-pantry",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "npm@11.8.0",
+  "engines": { "node": "24.13.1" },
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "dev": "npm run build -w @print-pantry/contracts -w @print-pantry/db && concurrently -k -n contracts,db,api,web \"npm run watch -w @print-pantry/contracts\" \"npm run watch -w @print-pantry/db\" \"npm run dev -w @print-pantry/api\" \"npm run dev -w @print-pantry/web\"",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run build -w @print-pantry/contracts -w @print-pantry/db && npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "test": "npm run test --workspaces --if-present",
+    "db:migrate": "npm run db:migrate --workspace @print-pantry/db",
+    "db:generate": "npm run db:generate --workspace @print-pantry/db"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.0",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.39.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1",
+    "vitest": "^4.0.15"
+  }
+}
