@@ -1,7 +1,12 @@
 import type { HealthResponse, ReadinessResponse } from '@print-pantry/contracts';
 import Fastify from 'fastify';
+import { createAuth } from './auth.js';
+import { registerCatalog, type CatalogOptions } from './catalog.js';
 
-export function buildServer(pool: { query(sql: string): Promise<unknown> }) {
+export function buildServer(
+  pool: { query(sql: string): Promise<unknown> },
+  catalog?: CatalogOptions & { secureCookie: boolean },
+) {
   const server = Fastify({ logger: true });
 
   server.get<{ Reply: HealthResponse }>('/health', async () => ({ status: 'ok' }));
@@ -14,6 +19,11 @@ export function buildServer(pool: { query(sql: string): Promise<unknown> }) {
       return reply.code(503).send({ status: 'unavailable' });
     }
   });
+
+  if (catalog) {
+    const auth = createAuth(server, catalog.pool, catalog.secureCookie);
+    registerCatalog(server, catalog, auth);
+  }
 
   return server;
 }
