@@ -2,6 +2,7 @@ import type { HealthResponse, ReadinessResponse } from '@print-pantry/contracts'
 import Fastify from 'fastify';
 import { createAuth } from './auth.js';
 import { registerCatalog, type CatalogOptions } from './catalog.js';
+import { registerRequests } from './requests.js';
 
 export function buildServer(
   pool: { query(sql: string): Promise<unknown> },
@@ -23,6 +24,7 @@ export function buildServer(
   if (catalog) {
     const auth = createAuth(server, catalog.pool, catalog.secureCookie);
     registerCatalog(server, catalog, auth);
+    registerRequests(server, catalog.pool, auth, catalog.indexer);
   }
 
   return server;

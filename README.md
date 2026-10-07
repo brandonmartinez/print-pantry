@@ -4,9 +4,8 @@ A cozy home for 3D print files: browse a model library, pick a project, and
 queue a print request.
 
 The React/Vite catalog, Fastify API, typed shared contracts, and PostgreSQL
-catalog use Drizzle migrations. Print requests and the operator queue follow
-in Phase 3. Files remain usable outside the app; no print is automatically
-started.
+catalog and request queue use Drizzle migrations. Files remain usable outside
+the app; no print is automatically started.
 
 See [KICKOFF.md](KICKOFF.md) for the initial product and implementation brief.
 
@@ -27,6 +26,7 @@ and `packages/indexer`.
 | `npm run typecheck` | Build shared declarations first, then type-check all workspaces |
 | `npm run lint` | Lint workspace code |
 | `npm test` | Run focused API, React, and database tests (requires isolated test DB) |
+| `npm run test:browser` | Run synthetic localhost desktop/mobile Edge/Chromium request journeys (see below) |
 | `npm run db:generate` | Generate a reviewed SQL migration from schema changes |
 | `npm run db:migrate` | Apply versioned migrations to `DATABASE_URL` (build first) |
 
@@ -50,7 +50,7 @@ prevents startup rather than serving stale output.
 `GET /health` reports process liveness; `GET /ready` checks PostgreSQL
 connectivity and returns HTTP 503 when it is unavailable. The frontend calls
 `/api/*` through the Vite development proxy; it removes the `/api` prefix
-before forwarding to Fastify. The request queue is not yet implemented.
+before forwarding to Fastify.
 
 ## Library catalog and household access
 
@@ -122,8 +122,80 @@ the separately maintained library. Verify the database backup by restoring
 into a separate disposable PostgreSQL instance, applying migrations there,
 and checking project/asset/version counts and representative metadata without
 pointing the restored instance at the real library. Never use a restore test
-against an existing database or let it scan the real NAS. Print request
-references are planned against the stable IDs in this catalog.
+against an existing database or let it scan the real NAS. Include request,
+selected-file, queue, and action-history records in restore verification.
+
+## Print requests and operator queue
+
+Sign in as a requester or operator, open a project, and explicitly select the
+files to print. Multipart files and variants are never combined or chosen
+automatically. Enter a whole-number quantity from 1 to 100, optional preferred
+material and color, and optional notes. A request retains the exact selected
+asset and version IDs, a source-file metadata snapshot, and its preferences
+even when a scan renames a project, finds a new version, or marks an old file
+missing. An unavailable version is labeled as such; opening its historical
+download returns 410, never a different indexed version. Version-specific
+downloads check the indexed SHA-256 before streaming and return 409 if source
+bytes changed without a rescan, even when file size and modification time
+appear unchanged. Offline or partial NAS scans
+do not erase requests or history. Print Pantry tracks decisions only: opening
+or downloading a file remains a separate, manual slicer workflow.
+
+Requesters can view their own requests and cancel them while **requested** or
+**queued**. Operators can view all requests and the queue. The server enforces
+this transition graph (no transitions out of a terminal state):
+
+| Current state | Action | Next state | Who |
+| --- | --- | --- | --- |
+| requested | approve | queued | operator |
+| requested | decline | declined | operator |
+| requested, queued | cancel | canceled | owning requester |
+| queued, selected as next | start | printing | operator |
+| printing | complete | completed | operator |
+
+An operator can add action notes, reorder all queued requests, and choose a
+queued request as next before marking it printing. The queue contains only
+queued requests; printing and terminal requests are not reorderable. Status
+changes, queue order, and the selected-next pointer are committed together.
+Queue-changing API calls use a monotonically increasing `revision`; send the
+revision returned by `GET /api/requests/queue` as `expectedRevision` when
+reordering or choosing next. A stale revision, outdated status, or changed
+queue membership returns 409; reload the queue before retrying rather than
+silently overwriting another operator's decision. Action history records the
+actor and timestamp for every meaningful request change.
+
+The backend serves the following authenticated routes without `/api`; Vite
+rewrites the browser's `/api` prefix. `POST /requests` accepts `projectId`,
+`selected: [{assetId, versionId}]`, `quantity`, and optional `material`,
+`color`, and `notes`. `GET /requests` lists only the signed-in requester's own
+requests, or all requests for an operator; `GET /requests/:id` returns details
+and history subject to the same ownership rule. `PATCH /requests/:id` performs
+`approve`, `decline`, `cancel`, `start`, or `complete` with optional `note` and
+`expectedRevision`. Operator-only `GET /requests/queue`,
+`PUT /requests/queue` (`orderedIds` must exactly match queued membership), and
+`POST /requests/queue/next` (`requestId`) manage ordering and selected-next.
+Unauthorized operations are rejected by the API, not just hidden in the UI.
+
+For a real browser run, start the development app with a **disposable** database,
+a generated STL-only library, and synthetic operator/requester accounts. The
+browser suite in `tests/browser/` fails closed unless
+`PANTRY_E2E_SYNTHETIC=1`, `PANTRY_E2E_BASE_URL` points to
+`http://127.0.0.1:<web-port>`, `PANTRY_E2E_BROWSER_PATH` names an already
+installed Chromium-compatible browser, and `PANTRY_E2E_PASSWORD` is the
+synthetic accounts' password. Set `PANTRY_E2E_SYNTHETIC_LIBRARY_ROOT` to the
+host directory of the generated STL fixture, mounted read-only in the
+container. It must live under a Copilot session-state directory or a
+`print-pantry-e2e-*` temporary directory; the suite verifies the exact
+generated STL content before temporarily moving it and restores it afterward.
+The accounts are named `syntheticoperator` and `syntheticrequester`.
+Run `npm run test:browser` on the host with Node 24.13.1
+while the isolated app container is ready. The suite exercises desktop and
+mobile browsing/search, clipboard and exact-file download, selection and
+submission, cancellation/decline, approval/reorder/selected-next, printing
+and completion, requester history, unavailable-version/410 behavior after a
+synthetic rescan and subsequent recovery, and viewport overflow. It creates real
+requests in the **disposable** database; never aim it at an existing
+household database or actual library.
 
 ## Development container
 

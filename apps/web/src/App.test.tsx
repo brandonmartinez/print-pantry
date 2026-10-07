@@ -69,6 +69,57 @@ const detail = {
   ],
 };
 const scan = { state: 'idle', lastSuccessfulAt: '2026-10-01T10:00:00.000Z', lastError: null };
+const printRequest = {
+  id: 'request-1',
+  projectId: 'desk-organizer',
+  projectName: 'Desk Organizer',
+  requester: { id: 'u-1', username: 'maker', role: 'requester' },
+  status: 'requested',
+  quantity: 2,
+  material: 'PLA',
+  color: 'sage green',
+  notes: 'Matte finish please.',
+  createdAt: '2026-10-02T10:00:00.000Z',
+  updatedAt: '2026-10-02T10:00:00.000Z',
+  selected: [{
+    assetId: 'asset-2',
+    versionId: 'version-2',
+    name: 'part-2.stl',
+    relativePath: 'Parts/part-2.stl',
+    variant: 'Small',
+    available: true,
+    unavailableReason: null,
+    downloadUrl: '/api/catalog/assets/asset-2/download',
+  }],
+};
+const printRequestDetail = {
+  ...printRequest,
+  history: [{
+    id: 'history-1',
+    actor: { id: 'operator-1', username: 'operator', role: 'operator' },
+    action: 'approve',
+    fromStatus: 'requested',
+    toStatus: 'queued',
+    fromPosition: null,
+    toPosition: 1,
+    note: 'Ready for the next batch.',
+    createdAt: '2026-10-03T10:00:00.000Z',
+  }, {
+    id: 'history-2',
+    actor: { id: 'operator-1', username: 'operator', role: 'operator' },
+    action: 'reorder',
+    fromStatus: 'queued',
+    toStatus: 'queued',
+    fromPosition: 2,
+    toPosition: 1,
+    note: null,
+    createdAt: '2026-10-03T11:00:00.000Z',
+  }],
+};
+const queuedRequests = [
+  { ...printRequest, id: 'queue-1', status: 'queued', projectName: 'Desk Organizer' },
+  { ...printRequest, id: 'queue-2', status: 'queued', projectName: 'Reading Lamp' },
+];
 
 function jsonResponse(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
@@ -78,7 +129,7 @@ function listResponse(page = 1, items = [project], total = 1) {
   return { items, total, page, pageSize: 12, categories: ['Home', 'Toys'], fileTypes: ['mesh', 'source'], scan };
 }
 
-function mockApi(role: 'operator' | 'requester' = 'requester') {
+function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueConflict?: boolean; sourceUnavailable?: boolean } = {}) {
   const calls: Array<{ path: string; init?: RequestInit }> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
@@ -112,14 +163,29 @@ function mockApi(role: 'operator' | 'requester' = 'requester') {
     if (path === '/api/catalog/projects/desk-organizer' && method === 'PATCH') return jsonResponse({ project: detail });
     if (path === '/api/catalog/boundaries' && method === 'PUT') return jsonResponse({ project: detail });
     if (path === '/api/catalog/rescan' && method === 'POST') return jsonResponse({ scan: { state: 'scanning' } });
+    if (path === '/api/requests' && method === 'POST') return jsonResponse({ request: printRequest, revision: 1 });
+    if (path === '/api/requests') {
+      const request = options.sourceUnavailable ? {
+        ...printRequest,
+        selected: [{ ...printRequest.selected[0], available: false, unavailableReason: 'asset_missing', downloadUrl: null }],
+      } : printRequest;
+      return jsonResponse({ items: role === 'operator' ? [request, ...queuedRequests] : [request] });
+    }
+    if (path === '/api/requests/queue') {
+      if (method === 'PUT' && options.queueConflict) return jsonResponse({ message: 'Queue changed' }, 409);
+      return jsonResponse({ items: queuedRequests, revision: 4, selectedNextId: 'queue-1' });
+    }
+    if (path === '/api/requests/queue/next' && method === 'POST') return jsonResponse({ items: queuedRequests, revision: 5, selectedNextId: 'queue-2' });
+    if (path === '/api/requests/request-1' && method === 'GET') return jsonResponse({ request: printRequestDetail });
+    if (path.startsWith('/api/requests/') && method === 'PATCH') return jsonResponse({ request: printRequest, revision: 5 });
     return jsonResponse({ message: `Unexpected API request: ${method} ${path}` }, 404);
   });
   vi.stubGlobal('fetch', fetchMock);
   return { calls, fetchMock };
 }
 
-async function signIn(role: 'operator' | 'requester' = 'requester') {
-  const api = mockApi(role);
+async function signIn(role: 'operator' | 'requester' = 'requester', options: { sourceUnavailable?: boolean } = {}) {
+  const api = mockApi(role, options);
   render(<App />);
   await screen.findByRole('heading', { name: 'Welcome to the pantry' });
   fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'maker' } });
@@ -257,6 +323,92 @@ it('does not expose operator actions to household members', async () => {
   expect(await screen.findByRole('heading', { name: 'Desk Organizer' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Edit metadata' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Set project boundary' })).toBeNull();
+});
+
+it('requires explicit file-version selection and submits a bounded print request', async () => {
+  const { calls } = await signIn('requester');
+  fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
+  await screen.findByRole('heading', { name: 'Request this print' });
+  fireEvent.click(screen.getByRole('checkbox', { name: /part-2\.stl.*Small/i }));
+  fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '3' } });
+  fireEvent.change(screen.getByLabelText('Material'), { target: { value: 'PETG' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Submit print request' }));
+  expect(await screen.findByText(/Request request-1 submitted/)).toBeTruthy();
+  const submit = calls.find(({ path, init }) => path === '/api/requests' && init?.method === 'POST');
+  expect(JSON.parse(String(submit?.init?.body))).toEqual({
+    projectId: 'desk-organizer',
+    selected: [{ assetId: 'asset-2', versionId: 'version-2' }],
+    quantity: 3,
+    material: 'PETG',
+  });
+});
+
+it('shows requester history and permits cancellation before printing', async () => {
+  const { calls } = await signIn('requester');
+  fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+  expect(await screen.findByRole('heading', { name: 'Your requests' })).toBeTruthy();
+  expect(screen.getByText('Parts/part-2.stl')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel request' }));
+  await waitFor(() => {
+    const cancellation = calls.find(({ path, init }) => path === '/api/requests/request-1' && init?.method === 'PATCH');
+    expect(JSON.parse(String(cancellation?.init?.body))).toEqual({ action: 'cancel' });
+  });
+});
+
+it('explains unavailable selected sources without exposing internal reason codes', async () => {
+  await signIn('requester', { sourceUnavailable: true });
+  fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+  expect(await screen.findByText('The selected source file is no longer available.')).toBeTruthy();
+  expect(screen.getByText('Exact version unavailable')).toBeTruthy();
+  expect(screen.queryByText('asset_missing')).toBeNull();
+});
+
+it('loads detail-only request history when its disclosure opens', async () => {
+  const { calls } = await signIn('requester');
+  fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+  await screen.findByRole('heading', { name: 'Your requests' });
+  fireEvent.click(screen.getByText('Request history', { selector: 'summary' }));
+  expect(await screen.findAllByText('by operator')).toHaveLength(2);
+  expect(screen.getByText('Ready for the next batch.')).toBeTruthy();
+  expect(screen.getByText('Moved in queue from 2 to 1')).toBeTruthy();
+  expect(calls.some(({ path, init }) => path === '/api/requests/request-1' && (init?.method || 'GET') === 'GET')).toBe(true);
+});
+
+it('preserves an unsaved queue draft until it is saved', async () => {
+  const api = mockApi('operator');
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Welcome to the pantry' });
+  fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'maker' } });
+  fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pantry-pass' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  await screen.findByRole('heading', { name: 'Browse projects' });
+  fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+  await screen.findByRole('heading', { name: 'Print queue' });
+  fireEvent.click(screen.getByRole('button', { name: 'Move queue-2 earlier' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Choose next' }));
+  expect(await screen.findByText('Save queue order before choosing the next print.')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Save queue order' })).toBeTruthy();
+  expect(api.calls.some(({ path }) => path === '/api/requests/queue/next')).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: 'Approve and queue' }));
+  expect(await screen.findByText('Save queue order before updating requests.')).toBeTruthy();
+  expect(api.calls.some(({ path, init }) => path === '/api/requests/request-1' && init?.method === 'PATCH')).toBe(false);
+});
+
+it('refreshes an operator queue after a stale reorder conflict', async () => {
+  const api = mockApi('operator', { queueConflict: true });
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Welcome to the pantry' });
+  fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'maker' } });
+  fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pantry-pass' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  await screen.findByRole('heading', { name: 'Browse projects' });
+  fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+  expect(await screen.findByRole('heading', { name: 'Print queue' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Move queue-2 earlier' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save queue order' }));
+  expect(await screen.findByText('The queue changed elsewhere, so the latest queue has been loaded.')).toBeTruthy();
+  const reorder = api.calls.find(({ path, init }) => path === '/api/requests/queue' && init?.method === 'PUT');
+  expect(JSON.parse(String(reorder?.init?.body))).toEqual({ orderedIds: ['queue-2', 'queue-1'], expectedRevision: 4 });
 });
 
 it('logs out through the household session endpoint', async () => {

@@ -12,11 +12,13 @@
     "typecheck": "npm run build -w @print-pantry/contracts -w @print-pantry/db -w @print-pantry/indexer && npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
     "test": "npm run test --workspaces --if-present",
+    "test:browser": "playwright test tests/browser --workers=1",
     "db:migrate": "npm run db:migrate --workspace @print-pantry/db",
     "db:generate": "npm run db:generate --workspace @print-pantry/db"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "1.63.0",
     "@types/node": "^24.10.0",
     "concurrently": "^9.2.1",
     "eslint": "^9.39.1",
