@@ -5,8 +5,10 @@ separate from `compose.dev.yml`: development's localhost ports, disposable
 database, and dev-container SSH service are not a production topology.
 
 Production uses `compose.prod.yml` with `api`, `web`, and `db` services.
-`compose.external.yml` is the explicit external-database override: it removes
-the default internal database profile and requires `DATABASE_URL`. Do not
+`compose.external.yml` is the explicit external-database override: it places
+the internal database behind an inactive profile and requires `DATABASE_URL`.
+The default file deliberately clears an inherited `DATABASE_URL`; only the
+override can point the API at an external database. Do not
 substitute development commands into a NAS. The deployment provides:
 
 - a multi-stage Node 24.13.1 API image and an nginx image that serves the
@@ -30,18 +32,35 @@ must likewise be secret-mounted only for the dependency-install layer.
 
 ## Initial deployment
 
-Before building, use the deployment's documented preflight to verify the
-production environment has all required secret-file paths, an existing npm
-configuration file, an empty or intentionally provisioned database volume, and
-the intended **read-only** library path. Confirm the library path in the
-environment is the container path and `CLIENT_MOUNT_PREFIX`, when set, is the
-separate client-visible path; do not expose a container-only path to browser
-operators.
+Copy `deploy/production.env.example` into an ignored `.env`, fill its
+placeholders, and restrict access to the file. Set `LIBRARY_HOST_PATH` to an
+existing absolute host directory: Compose mounts it read-only at
+`LIBRARY_ROOT=/mnt/library` in the container. `CLIENT_MOUNT_PREFIX`, when
+set, is the separate client-visible path; do not expose a container-only path
+to browser operators. For internal PostgreSQL, create an external password
+file containing a unique 24+ character URI-safe password (for example,
+`openssl rand -hex 24 > /private/path/db-password`), restrict it to its owner,
+and set `DB_PASSWORD_FILE` to its absolute path. The tracked empty secret
+placeholder cannot start the database.
 
-Set production configuration in an ignored environment file, including the
-exact HTTPS `PUBLIC_ORIGIN`, `COOKIE_SECURE=true`, the read-only
-`LIBRARY_ROOT`, and any optional client mount prefix. Export the needed
-variables from that file without printing them. Docker Compose v5 cannot grant
+Before building, confirm the library and secret paths exist and inspect the
+Compose topology without printing its configuration (which can include
+credentials). Export variables from the trusted, ignored `.env` for Bake;
+Compose also reads that file from the repository root:
+
+```sh
+set -a
+. ./.env
+set +a
+test -d "$LIBRARY_HOST_PATH" && test -s "$HOST_NPM_CONFIG_FILE"
+test -n "${DATABASE_URL:-}" || test -s "$DB_PASSWORD_FILE"
+docker compose -p <composeproject> -f compose.prod.yml config --quiet
+```
+
+Use a dedicated database and database role if choosing the external
+override, and verify the intended endpoint separately before migrations.
+Set exact private HTTPS `PUBLIC_ORIGIN` and `COOKIE_SECURE=true`. Docker
+Compose v5 cannot grant
 BuildKit filesystem access to the host npm configuration through `docker
 compose build`; build the two images with Bake instead:
 
@@ -55,9 +74,9 @@ docker buildx bake -f compose.prod.yml \
   api web
 ```
 
-The first allowed path is the `HOST_NPM_CONFIG_FILE` value. The secret
-directory covers required runtime password and optional npm CA/proxy secret
-files. Compose passes the npm configuration as the required `npmrc` BuildKit
+The first allowed path is the `HOST_NPM_CONFIG_FILE` value. The secret directory covers the internal database password file and optional
+npm CA/proxy secret files. Compose passes the npm configuration as the
+required `npmrc` BuildKit
 secret and can also secret-mount `npm_ca` and `npm_proxy`. The build must fail
 if the configured registry cannot be reached; do not switch to a public
 registry.
@@ -90,8 +109,9 @@ docker compose -p <composeproject> -f compose.prod.yml up -d --wait api web
 The frontend origin is intended for a private HTTPS reverse proxy, not direct
 public internet exposure. At that boundary:
 
-1. Terminate HTTPS at the private reverse proxy and forward the original
-   scheme/host as configured by the deployment.
+1. Terminate HTTPS at the private reverse proxy and preserve its original
+   `Host` header. The internal nginx-to-Fastify hop uses HTTP; Fastify does
+   not trust forwarded headers to decide the public origin.
 2. Use an origin allowed by the application; do not relax CORS merely to make a
    new proxy work.
 3. Set `COOKIE_SECURE=true` behind HTTPS and make `PUBLIC_ORIGIN` exactly
@@ -101,9 +121,18 @@ public internet exposure. At that boundary:
 4. Do not publish PostgreSQL. Restrict the application itself to the intended
    private network.
 
-Local HTTP is only for intentional localhost operation: bind locally and set
-`ALLOW_INSECURE_HTTP=true`. Never use that setting for a reverse-proxied or
-network-accessible deployment.
+The Compose port defaults to host loopback for a reverse proxy on the Docker
+host. A proxy in another network needs an explicitly scoped network/binding
+and firewall policy; do not make the port publicly reachable simply to connect
+it. These images are built for the builder's platform by default. Confirm the
+NAS CPU architecture and build a matching image before transfer; the local
+tests here do not establish NAS platform compatibility.
+
+Local HTTP is only for intentionally isolated testing: set
+`WEB_BIND_ADDRESS=127.0.0.1`, `PUBLIC_ORIGIN=http://127.0.0.1:<WEB_PORT>`,
+`COOKIE_SECURE=false`, and `ALLOW_INSECURE_HTTP=true`. The application
+refuses this exception when the host binding is non-loopback. Never use it
+for a NAS or reverse-proxied deployment.
 
 Migrations are not run by HTTP requests. After the API is running, create the
 first household account interactively:
@@ -133,11 +162,12 @@ Keep the production Compose revision, environment file, password-file secret,
 library mount configuration, and database volume together as one deployment
 record. Before an upgrade, record the currently running image/revision and
 take a verified backup. Build the new image through the secret-based path,
-run the explicit migration step exactly once, replace the application services,
-and wait for readiness before switching proxy traffic. When using an external
-database, include `-f compose.external.yml` consistently in each Compose
-command. Never point a migration or test command at an unrelated external
-schema.
+stop `web` and `api` to quiesce application writes, run the explicit migration
+with `run --rm --no-deps api node packages/db/dist/migrate.js`, then restart
+with `up -d --wait api web`. Do not reset the database volume or replace a
+failed migration with an empty database. When using an external database,
+include `-f compose.external.yml` consistently in each Compose command.
+Never point a migration or test command at an unrelated external schema.
 
 Rescans are read-only. Operators may trigger them from the catalog UI/API, and
 the scheduler uses `SCAN_INTERVAL_MINUTES`. Configure ignored directories only
@@ -164,6 +194,16 @@ The database and the real library are separate recovery domains. Back up both:
 
 Verify every backup non-destructively before relying on it:
 
+Quiesce application and import/SMB writes while capturing a coordinated
+database dump and library snapshot/copy. A PostgreSQL dump is internally
+consistent, but it does not freeze a separately mounted library. Record both
+capture times and reject a pair if file content changed between captures.
+Retain backups and their restore evidence according to an owner-approved
+retention policy on storage independent of the live database/library; keep
+at least one previously verified recovery point across upgrades. The
+verification script retains its archive and fresh target; never reuse them
+as a live database or silently remove them.
+
 The `scripts/verify-restore.sh` worker requires Bash and PostgreSQL 17 client
 tools. Supply connection settings through the environment, keeping credentials
 in approved external authentication mechanisms rather than command history:
@@ -182,16 +222,20 @@ BACKUP_FILE=/absolute/path/to/backup \
 scripts/verify-restore.sh
 ```
 
-The script reads the source dump only, requires a fresh isolated restore
+The script reads the source only, requires a fresh isolated restore
 target, and checks the restored rowsets. It refuses an unsafe restore target;
 do not bypass that refusal. Use a unique
 `print_pantry_restore_<unique>` database name and never point `RESTORE_*` at
-the production service. Also verify an isolated, read-only library fixture or
-copy: compare project, asset, and version counts; sample metadata; verify
-representative request, queue, selected-file, and action-history records; and
-exercise authenticated catalog access. Record the backup identifier, software
-revision, verification date, and result. Treat a failed verification as an
-unusable backup.
+the production service. Independently verify the library backup by restoring
+a **copy** outside the live mount and comparing a complete file manifest
+(relative paths, sizes, and SHA-256 digests), including models, images,
+sidecars, and archive roots. Keep this verification copy read-only to Print
+Pantry; use the restored database only with that copy or a separate generated
+fixture, never with the live library. Check representative catalog metadata,
+selected versions, request/history/queue records, and authenticated
+download/preview from the isolated restored pair. Record the backup identifier,
+software revision, verification date, and result. Treat a failed verification
+as an unusable backup.
 
 Refuse a restore target unless it is positively identified as the disposable
 verification instance. Do not automate broad deletes, volume removal, or a

@@ -20,7 +20,7 @@ export function productionOrigin(
   } else if (url.protocol === 'http:' &&
       (url.hostname === 'localhost' || url.hostname === '127.0.0.1') &&
       environment.ALLOW_INSECURE_HTTP === 'true' &&
-      (environment.WEB_BIND_ADDRESS === '127.0.0.1' || environment.WEB_BIND_ADDRESS === '::1')) {
+      environment.WEB_BIND_ADDRESS === '127.0.0.1') {
     if (secureCookie) throw new Error('COOKIE_SECURE must be false for isolated localhost HTTP');
   } else {
     throw new Error('Production requires HTTPS, except explicitly enabled loopback-bound localhost HTTP');

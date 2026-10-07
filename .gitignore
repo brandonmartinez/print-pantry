@@ -5,6 +5,8 @@ test-results/
 playwright-report/
 .env
 .env.*
+*.env
+deploy/*.secret
 !.env.example
 *.tsbuildinfo
 .DS_Store

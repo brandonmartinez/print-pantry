@@ -35,8 +35,8 @@ const indexer = createLibraryIndexer({
 });
 const server = buildServer(pool, {
   pool, root, clientMountPrefix: process.env.CLIENT_MOUNT_PREFIX,
-  indexer, read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: cookieSecure === 'true', publicOrigin,
-});
+  indexer, read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: cookieSecure === 'true',
+}, publicOrigin);
 const port = Number(process.env.API_PORT ?? 3000);
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('API_PORT must be a valid TCP port');

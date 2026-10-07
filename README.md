@@ -10,9 +10,8 @@ the app; no print is automatically started.
 See [KICKOFF.md](KICKOFF.md) for the initial product and implementation brief.
 For production deployment, routine operations, backup/restore verification, and
 the generated-catalog retirement handoff, see
-[docs/production-operations.md](docs/production-operations.md). It documents
-the safeguards and prerequisites; use the Phase 4 production Compose files'
-own command examples once they are present on the deployed revision.
+[docs/production-operations.md](docs/production-operations.md) for the
+production Compose commands, prerequisites, and safeguards.
 
 ## Workspace and commands
 

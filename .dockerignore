@@ -1,6 +1,12 @@
 .git
 .env
 .env.*
+*.env
+**/*.env
+**/.env
+**/.env.*
+**/*.secret
+**/secrets/**
 !.env.example
 node_modules
 **/dist

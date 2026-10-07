@@ -6,16 +6,16 @@ import { registerRequests } from './requests.js';
 
 export function buildServer(
   pool: { query(sql: string): Promise<unknown> },
-  catalog?: CatalogOptions & { secureCookie: boolean; publicOrigin?: string },
+  catalog?: CatalogOptions & { secureCookie: boolean },
+  publicOrigin?: string,
 ) {
   const server = Fastify({ logger: true });
 
-  if (catalog?.publicOrigin) {
-    const origin = catalog.publicOrigin;
-    const host = new URL(origin).host;
+  if (publicOrigin) {
+    const host = new URL(publicOrigin).host;
     server.addHook('onRequest', async (request, reply) => {
       if (request.method === 'GET' || request.method === 'HEAD' || request.method === 'OPTIONS') return;
-      if (request.headers.origin !== origin || request.headers.host !== host) {
+      if (request.headers.origin !== publicOrigin || request.headers.host !== host) {
         return reply.code(403).send({ error: 'Request origin or host is not allowed' });
       }
     });
@@ -24,7 +24,7 @@ export function buildServer(
   server.get<{ Reply: HealthResponse }>('/health', async () => ({ status: 'ok' }));
   server.get<{ Reply: ReadinessResponse }>('/ready', async (_request, reply) => {
     try {
-      await pool.query(catalog?.publicOrigin
+      await pool.query(publicOrigin
         ? 'SELECT 1 FROM users, print_requests, request_queue_state LIMIT 1'
         : 'SELECT 1');
       return { status: 'ready' };
