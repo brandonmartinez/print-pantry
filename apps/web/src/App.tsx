@@ -25,11 +25,12 @@ type Project = {
 };
 type ProjectFile = {
   id: string;
-  versionId: string;
+  versionId: string | null;
   name: string;
   relativePath: string;
   variant?: string | null;
   fileType: string;
+  extension: string;
   size: number;
   available: boolean;
   clientPath?: string | null;
@@ -72,9 +73,9 @@ async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   if (response.status === 204) return undefined as T;
 
-  const body = await response.json() as { message?: string };
+  const body = await response.json() as { error?: string; message?: string };
   if (!response.ok) {
-    throw new ApiError(body?.message || `Request failed (${response.status})`, response.status);
+    throw new ApiError(body?.error || body?.message || `Request failed (${response.status})`, response.status);
   }
   return body as T;
 }
@@ -290,7 +291,7 @@ function StlPreview({ file }: { file: ProjectFile }) {
     if (!geometry) void loadGeometry();
   }
 
-  if (file.fileType.toLowerCase() !== 'stl') return null;
+  if (file.fileType.toLowerCase() !== 'mesh' || file.extension.toLowerCase() !== '.stl') return null;
   if (!geometryUrl) {
     return <span className="mesh-unavailable" role="status">3D preview unavailable</span>;
   }
@@ -388,7 +389,7 @@ function ScanBadge({ scan }: { scan?: Scan }) {
       ? 'scan-running'
       : 'scan-ready';
   const date = formatDate(scan.lastSuccessfulAt);
-  const label = state === 'idle' || state === 'ready' || state === 'complete'
+  const label = state === 'idle' || state === 'ready' || state === 'complete' || state === 'succeeded'
     ? `Library ${date ? `checked ${date}` : 'ready'}`
     : scan.state;
   return (
@@ -748,11 +749,11 @@ function App() {
     const controller = new AbortController();
     const params = new URLSearchParams({
       q: searchTerm,
-      category,
-      fileType,
       page: String(page),
       pageSize: String(pageSize),
     });
+    if (category) params.set('category', category);
+    if (fileType) params.set('fileType', fileType);
     setCatalogLoading(true);
     setCatalogError('');
     apiRequest<CatalogResponse>(`/api/catalog/projects?${params}`, { signal: controller.signal })

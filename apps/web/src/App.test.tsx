@@ -28,7 +28,8 @@ const detail = {
       name: 'part-10.stl',
       relativePath: 'Parts/part-10.stl',
       variant: 'Large',
-      fileType: 'stl',
+      fileType: 'mesh',
+      extension: '.stl',
       size: 2048,
       available: true,
       clientPath: '/print-library/Home/Desk Organizer/Parts/part-10.stl',
@@ -42,7 +43,8 @@ const detail = {
       name: 'part-2.stl',
       relativePath: 'Parts/part-2.stl',
       variant: 'Small',
-      fileType: 'stl',
+      fileType: 'mesh',
+      extension: '.stl',
       size: 1024,
       available: true,
       clientPath: '/print-library/Home/Desk Organizer/Parts/part-2.stl',
@@ -56,7 +58,8 @@ const detail = {
       name: 'missing.stl',
       relativePath: 'Parts/missing.stl',
       variant: null,
-      fileType: 'stl',
+      fileType: 'mesh',
+      extension: '.stl',
       size: 0,
       available: false,
       clientPath: null,
@@ -72,10 +75,10 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 function listResponse(page = 1, items = [project], total = 1) {
-  return { items, total, page, pageSize: 12, categories: ['Home', 'Toys'], fileTypes: ['stl', '3mf'], scan };
+  return { items, total, page, pageSize: 12, categories: ['Home', 'Toys'], fileTypes: ['mesh', 'source'], scan };
 }
 
-function mockApi(role: 'operator' | 'member' = 'member') {
+function mockApi(role: 'operator' | 'requester' = 'requester') {
   const calls: Array<{ path: string; init?: RequestInit }> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
@@ -115,7 +118,7 @@ function mockApi(role: 'operator' | 'member' = 'member') {
   return { calls, fetchMock };
 }
 
-async function signIn(role: 'operator' | 'member' = 'member') {
+async function signIn(role: 'operator' | 'requester' = 'requester') {
   const api = mockApi(role);
   render(<App />);
   await screen.findByRole('heading', { name: 'Welcome to the pantry' });
@@ -133,11 +136,14 @@ afterEach(() => {
 });
 
 it('signs in and shows the authenticated image-first catalog', async () => {
-  await signIn();
+  const { calls } = await signIn();
   expect(await screen.findByRole('button', { name: 'Open Desk Organizer' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Open Ceramic Vase' })).toBeTruthy();
   expect(screen.getByText('13 projects')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Sign out' })).toBeTruthy();
+  const initialQuery = new URL(calls.find(({ path }) => path.startsWith('/api/catalog/projects?'))!.path, 'http://localhost').searchParams;
+  expect(initialQuery.has('category')).toBe(false);
+  expect(initialQuery.has('fileType')).toBe(false);
 });
 
 it('searches, filters by category and file type, and paginates', async () => {
@@ -149,8 +155,8 @@ it('searches, filters by category and file type, and paginates', async () => {
 
   fireEvent.change(screen.getByRole('combobox', { name: 'Filter by category' }), { target: { value: 'Home' } });
   await waitFor(() => expect(calls.some(({ path }) => new URL(path, 'http://localhost').searchParams.get('category') === 'Home')).toBe(true));
-  fireEvent.change(screen.getByRole('combobox', { name: 'Filter by file type' }), { target: { value: 'stl' } });
-  await waitFor(() => expect(calls.some(({ path }) => new URL(path, 'http://localhost').searchParams.get('fileType') === 'stl')).toBe(true));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Filter by file type' }), { target: { value: 'mesh' } });
+  await waitFor(() => expect(calls.some(({ path }) => new URL(path, 'http://localhost').searchParams.get('fileType') === 'mesh')).toBe(true));
 
   fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
   expect(await screen.findByRole('button', { name: 'Open Desk Organizer' })).toBeTruthy();
@@ -245,7 +251,7 @@ it('provides rescan and metadata/boundary editing only to operators', async () =
 });
 
 it('does not expose operator actions to household members', async () => {
-  await signIn('member');
+  await signIn('requester');
   expect(screen.queryByRole('button', { name: '↻ Rescan library' })).toBeNull();
   fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
   expect(await screen.findByRole('heading', { name: 'Desk Organizer' })).toBeTruthy();
@@ -264,7 +270,7 @@ it('shows an explicit unavailable state when the catalog service is offline', as
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
     if (path === '/api/auth/me') return jsonResponse({ message: 'Sign in required' }, 401);
-    if (path === '/api/auth/login') return jsonResponse({ user: { id: 'u-1', username: 'maker', role: 'member' } });
+    if (path === '/api/auth/login') return jsonResponse({ user: { id: 'u-1', username: 'maker', role: 'requester' } });
     throw new Error('network offline');
   });
   vi.stubGlobal('fetch', fetchMock);

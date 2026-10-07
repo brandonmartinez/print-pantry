@@ -28,7 +28,7 @@ type ProjectRow = {
   id: string; name: string; relative_path: string; category_path: string | null;
   description: string | null; tags: string[]; designer: string | null; source_url: string | null;
   license: string | null; notes: string | null; missing_at: Date | null;
-  asset_count: number; preview_asset_id: string | null;
+  asset_count: number; preview_asset_id: string | null; is_boundary?: boolean;
 };
 type AssetRow = {
   id: string; project_id: string; relative_path: string; project_relative_path: string;
@@ -100,9 +100,11 @@ async function projectById(pool: Pool, id: string): Promise<ProjectRow | undefin
   const result = await pool.query<ProjectRow>(
     `SELECT p.id, p.name, p.relative_path, c.relative_path AS category_path, p.description,
        p.tags, p.designer, p.source_url, p.license, p.notes, p.missing_at,
+       EXISTS (SELECT 1 FROM project_boundary_overrides o WHERE o.relative_path = p.relative_path) AS is_boundary,
        (SELECT count(*)::int FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL) AS asset_count,
        coalesce(
-         (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.missing_at IS NULL AND ${previewable}),
+         (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.project_id = p.id
+            AND a.missing_at IS NULL AND ${previewable}),
          (SELECT a.id FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL
             AND ${previewable} ORDER BY CASE WHEN a.kind = 'image' THEN 0 WHEN lower(a.extension) = '.stl' THEN 1 ELSE 2 END,
              a.sort_order LIMIT 1)
@@ -228,7 +230,8 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
            p.tags, p.designer, p.source_url, p.license, p.notes, p.missing_at,
            (SELECT count(*)::int FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL) AS asset_count,
            coalesce(
-             (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.missing_at IS NULL AND ${previewable}),
+             (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.project_id = p.id
+                AND a.missing_at IS NULL AND ${previewable}),
              (SELECT a.id FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL
                 AND ${previewable} ORDER BY CASE WHEN a.kind = 'image' THEN 0 WHEN lower(a.extension) = '.stl' THEN 1 ELSE 2 END,
                  a.sort_order LIMIT 1)
@@ -263,7 +266,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     );
     return { project: {
       ...summary(row, mount), designer: row.designer, sourceUrl: safeSource(row.source_url),
-      license: row.license, notes: row.notes,
+      license: row.license, notes: row.notes, isBoundary: row.is_boundary,
       files: assets.rows.sort((a, b) =>
         a.sort_order - b.sort_order || natural.compare(a.project_relative_path, b.project_relative_path))
         .map((asset) => assetResponse(asset, mount)),

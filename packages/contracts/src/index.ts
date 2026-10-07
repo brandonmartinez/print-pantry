@@ -64,6 +64,7 @@ export interface CatalogProjectDetail extends CatalogProjectSummary {
   sourceUrl: string | null;
   license: string | null;
   notes: string | null;
+  isBoundary: boolean;
   files: CatalogFile[];
 }
 

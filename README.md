@@ -17,7 +17,8 @@ configured for your environment. Do not change the registry to work around an
 installation failure. The project `.npmrc` omits registry-specific tarball
 URLs from the lockfile so each environment uses its own configured registry
 without changing pinned versions or integrity checks. `npm ci` installs the checked-in lockfile. The workspace
-contains `apps/web`, `apps/api`, `packages/contracts`, and `packages/db`.
+contains `apps/web`, `apps/api`, `packages/contracts`, `packages/db`,
+and `packages/indexer`.
 
 | Command | Purpose |
 | --- | --- |
@@ -41,7 +42,7 @@ an external or production database with the test URL.
 
 The shared packages export compiled `dist` files. Root `typecheck` deliberately
 builds them first so it works immediately after `npm ci`; root `dev` does the
-same before starting four coordinated watchers. Changes in contracts or DB
+same before starting five coordinated watchers. Changes in contracts, DB, or indexer
 source rebuild their outputs, and the API watcher restarts when shared outputs
 change. Stop all watchers together with Ctrl+C; a failed initial shared build
 prevents startup rather than serving stale output.

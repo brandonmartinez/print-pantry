@@ -338,12 +338,13 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
       const plans = ordered.map(({ project, files }) => {
         const path = project.directory.path;
         const occupant = projectByPath.get(path);
+        const occupantRelocated = occupant && uniqueTargets.has(occupant.id) && uniqueTargets.get(occupant.id) !== path;
         const key = projectSignature(project, files);
         const candidate = files.length === project.files.length && uniqueTargets.get(oldSignatures.get(key)?.[0]?.id ?? '') === path
           ? oldSignatures.get(key)?.[0] : undefined;
-        let existing = occupant;
+        let existing = occupantRelocated ? undefined : occupant;
         if (candidate && candidate.id !== occupant?.id) {
-          if (!occupant || (uniqueTargets.has(occupant.id) && uniqueTargets.get(occupant.id) !== path)) {
+          if (!occupant || occupantRelocated) {
             existing = candidate;
           } else {
             errors.push({ relativePath: path, code: 'AMBIGUOUS_PROJECT',
@@ -384,12 +385,14 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
         for (const file of files) {
           const path = relative(join(libraryRoot, project.directory.path), file.fullPath).split(sep).join('/');
           const occupant = available.find((asset) => asset.projectRelativePath === path);
+          const occupantRelocated = occupant && uniqueAssetTargets.has(occupant.id)
+            && uniqueAssetTargets.get(occupant.id) !== file.path;
           const key = assetKey({ hash: file.hash, size: file.stat.size, extension: file.extension });
           const candidate = oldByKey.get(key)?.length === 1 && newByKey.get(key) === 1
             ? oldByKey.get(key)![0] : undefined;
-          let old = occupant;
+          let old = occupantRelocated ? undefined : occupant;
           if (candidate && candidate.id !== occupant?.id) {
-            if (!occupant || (uniqueAssetTargets.has(occupant.id) && uniqueAssetTargets.get(occupant.id) !== file.path)) {
+            if (!occupant || occupantRelocated) {
               old = candidate;
             } else {
               errors.push({ relativePath: file.path, code: 'AMBIGUOUS_ASSET',
@@ -398,7 +401,13 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
               continue;
             }
           } else if (!old) {
-            old = candidate ?? oldAssetsByPath.get(file.path);
+            const pathAsset = oldAssetsByPath.get(file.path);
+            old = candidate ?? (pathAsset
+              && (!uniqueTargets.has(pathAsset.projectId)
+                || uniqueTargets.get(pathAsset.projectId) === project.directory.path)
+              && (!uniqueAssetTargets.has(pathAsset.id)
+                || uniqueAssetTargets.get(pathAsset.id) === file.path)
+              ? pathAsset : undefined);
             if (!old && oldByKey.has(key)) errors.push({ relativePath: file.path, code: 'AMBIGUOUS_ASSET',
               message: 'Duplicate content prevents unambiguous asset rename matching' });
           }
@@ -509,6 +518,9 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
               .where(and(eq(schema.projects.id, projectId), isNull(schema.projects.previewAssetId)));
           }
         }
+        await tx.execute(`UPDATE projects p SET preview_asset_id = NULL
+          WHERE p.preview_asset_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.id = p.preview_asset_id AND a.project_id = p.id)`);
         result.status = errors.length ? 'partial' : 'succeeded';
         if (result.status === 'succeeded') {
           const now = new Date();

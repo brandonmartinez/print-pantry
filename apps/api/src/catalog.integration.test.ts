@@ -141,6 +141,7 @@ describe('authenticated catalog and local files', () => {
     });
     expect(detail.statusCode).toBe(200);
     const project = detail.json().project;
+    expect(project.isBoundary).toBe(false);
     expect(project.files.map((file: { name: string }) => file.name))
       .toEqual(['cover.png', 'part 02.stl', 'part 10.stl']);
     const part = project.files.find((file: { name: string }) => file.name === 'part 02.stl');
@@ -213,6 +214,18 @@ describe('authenticated catalog and local files', () => {
     const part = detail.json().project.files.find((file: { name: string }) => file.name === 'part 02.stl');
     expect(part.id).toBe(assetId);
     expect(part.versionId).toBe(versionId);
+    expect((await server.inject({
+      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      payload: { projectId, isBoundary: true },
+    })).statusCode).toBe(200);
+    expect((await server.inject({ method: 'GET', url, headers: { cookie: operatorCookie } }))
+      .json().project.isBoundary).toBe(true);
+    expect((await server.inject({
+      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      payload: { projectId, isBoundary: false },
+    })).statusCode).toBe(200);
+    expect((await server.inject({ method: 'GET', url, headers: { cookie: operatorCookie } }))
+      .json().project.isBoundary).toBe(false);
   });
 
   it('falls back to a valid mesh when a preferred cover image becomes malformed', async () => {

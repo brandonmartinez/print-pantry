@@ -55,7 +55,7 @@ function zipFixture(files: Record<string, Buffer> | [string, Buffer][]): Buffer 
   return Buffer.concat([...local, ...central, end]);
 }
 
-async function fixture(path: string, content = 'solid fixture'): Promise<void> {
+async function fixture(path: string, content: string | Buffer = 'solid fixture'): Promise<void> {
   const fullPath = join(root, prefix, path);
   await mkdir(join(fullPath, '..'), { recursive: true });
   await writeFile(fullPath, content);
@@ -170,6 +170,56 @@ describe('read-only catalog reconciliation', () => {
     const [restored] = await db.select().from(schema.assets).where(eq(schema.assets.id, missing.id));
     expect(restored).toMatchObject({ currentVersionId: missing.currentVersionId, missingAt: null });
     expect((await db.select().from(schema.assetVersions).where(eq(schema.assetVersions.id, version.id)))[0].missingAt).toBeNull();
+  });
+
+  it('preserves a moved project and its files when another project reuses the old path', async () => {
+    await fixture('Category/Sub/Original/model.stl', 'original model');
+    const indexer = createLibraryIndexer({ db, root });
+    expect((await scan(indexer)).status).toBe('succeeded');
+    const [original] = await db.select().from(schema.projects)
+      .where(eq(schema.projects.relativePath, `${prefix}/Category/Sub/Original`));
+    const [originalAsset] = await db.select().from(schema.assets)
+      .where(eq(schema.assets.projectId, original.id));
+    await db.update(schema.projects).set({ notes: 'Keep with original' }).where(eq(schema.projects.id, original.id));
+    await rename(join(root, original.relativePath), join(root, prefix, 'Category/Sub/Relocated'));
+    await fixture('Category/Sub/Original/model.stl', 'replacement model');
+
+    expect((await scan(indexer)).status).toBe('succeeded');
+    expect((await db.select().from(schema.projects).where(eq(schema.projects.id, original.id)))[0])
+      .toMatchObject({ relativePath: `${prefix}/Category/Sub/Relocated`, notes: 'Keep with original' });
+    const [replacement] = await db.select().from(schema.projects)
+      .where(eq(schema.projects.relativePath, `${prefix}/Category/Sub/Original`));
+    expect(replacement.id).not.toBe(original.id);
+    const [movedAsset] = await db.select().from(schema.assets)
+      .where(eq(schema.assets.id, originalAsset.id));
+    expect(movedAsset).toMatchObject({
+      projectId: original.id, relativePath: `${prefix}/Category/Sub/Relocated/model.stl`,
+      currentVersionId: originalAsset.currentVersionId,
+    });
+    const [replacementAsset] = await db.select().from(schema.assets)
+      .where(eq(schema.assets.projectId, replacement.id));
+    expect(replacementAsset.id).not.toBe(originalAsset.id);
+  });
+
+  it('preserves a renamed asset when a different file reuses its filename', async () => {
+    await fixture('Category/Sub/Project/a.stl', 'original part');
+    const indexer = createLibraryIndexer({ db, root });
+    expect((await scan(indexer)).status).toBe('succeeded');
+    const [original] = await db.select().from(schema.assets)
+      .where(eq(schema.assets.relativePath, `${prefix}/Category/Sub/Project/a.stl`));
+    const parent = join(root, prefix, 'Category/Sub/Project');
+    await rename(join(parent, 'a.stl'), join(parent, 'b.stl'));
+    await fixture('Category/Sub/Project/a.stl', 'replacement part');
+
+    expect((await scan(indexer)).status).toBe('succeeded');
+    expect((await db.select().from(schema.assets).where(eq(schema.assets.id, original.id)))[0])
+      .toMatchObject({
+        relativePath: `${prefix}/Category/Sub/Project/b.stl`,
+        currentVersionId: original.currentVersionId,
+      });
+    const [replacement] = await db.select().from(schema.assets)
+      .where(eq(schema.assets.relativePath, `${prefix}/Category/Sub/Project/a.stl`));
+    expect(replacement.id).not.toBe(original.id);
   });
 
   it('reports duplicate rename ambiguity without merging project identities', async () => {
@@ -493,5 +543,30 @@ describe('read-only catalog reconciliation', () => {
     const [asset] = await db.select().from(schema.assets)
       .where(eq(schema.assets.relativePath, `${prefix}/Category/Sub/Parent/Child/part.stl`));
     expect(asset.projectId).toBe(child.id);
+  });
+
+  it('clears a preferred preview when an explicit boundary moves its asset into a child project', async () => {
+    await fixture('Category/Sub/Parent/model.stl', 'parent model');
+    await fixture('Category/Sub/Parent/Child/cover.png', Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==',
+      'base64',
+    ));
+    const indexer = createLibraryIndexer({ db, root });
+    expect((await scan(indexer)).status).toBe('succeeded');
+    const [parent] = await db.select().from(schema.projects)
+      .where(eq(schema.projects.relativePath, `${prefix}/Category/Sub/Parent`));
+    const [cover] = await db.select().from(schema.assets)
+      .where(eq(schema.assets.relativePath, `${prefix}/Category/Sub/Parent/Child/cover.png`));
+    expect(parent.previewAssetId).toBe(cover.id);
+    await db.insert(schema.projectBoundaryOverrides).values({
+      relativePath: `${prefix}/Category/Sub/Parent/Child`, kind: 'project',
+    });
+    expect((await scan(indexer)).status).toBe('succeeded');
+    expect((await db.select().from(schema.projects).where(eq(schema.projects.id, parent.id)))[0].previewAssetId)
+      .toBeNull();
+    const [child] = await db.select().from(schema.projects)
+      .where(eq(schema.projects.relativePath, `${prefix}/Category/Sub/Parent/Child`));
+    expect((await db.select().from(schema.assets).where(eq(schema.assets.id, cover.id)))[0].projectId)
+      .toBe(child.id);
   });
 });
