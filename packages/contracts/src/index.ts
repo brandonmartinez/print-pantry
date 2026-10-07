@@ -56,6 +56,7 @@ export interface CatalogFile {
   clientPath: string | null;
   downloadUrl: string;
   previewUrl: string | null;
+  geometryUrl?: string | null;
 }
 
 export interface CatalogProjectDetail extends CatalogProjectSummary {

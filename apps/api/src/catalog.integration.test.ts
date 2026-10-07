@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rename, rm, symlink, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDatabase, createPool, runMigrations } from '@print-pantry/db';
-import { createLibraryIndexer, read3mfThumbnail } from '@print-pantry/indexer';
+import { createLibraryIndexer, read3mfThumbnailFromHandle } from '@print-pantry/indexer';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hashPassword } from './auth.js';
 import { buildServer } from './server.js';
@@ -46,6 +46,10 @@ beforeAll(async () => {
     'solid lamp\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid lamp');
   await writeFile(path.join(projectFolder, 'files', 'part 10.stl'),
     'solid lamp\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 2 0 0\nvertex 0 2 0\nendloop\nendfacet\nendsolid lamp');
+  await writeFile(path.join(projectFolder, 'cover.png'), Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO9ZlHkAAAAASUVORK5CYII=',
+    'base64',
+  ));
   await writeFile(path.join(outside, 'private.stl'), 'outside the library');
   indexer = createLibraryIndexer({ db: createDatabase(pool), root, hashConcurrency: 2 });
   const scan = await indexer.rescan();
@@ -57,7 +61,7 @@ beforeAll(async () => {
     [randomUUID(), username, passwordHash, randomUUID(), requesterName],
   );
   server = buildServer(pool, {
-    pool, root, indexer, read3mfThumbnail, secureCookie: false,
+    pool, root, indexer, read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: false,
     clientMountPrefix: '/Volumes/Synthetic Library',
   });
   operatorCookie = await login(username);
@@ -65,13 +69,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (server) await server.close();
-  await pool.query('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ($1, $2))',
-    [username, requesterName]);
-  await pool.query('DELETE FROM users WHERE username IN ($1, $2)', [username, requesterName]);
-  await pool.end();
-  if (root) await rm(root, { recursive: true, force: true });
-  if (outside) await rm(outside, { recursive: true, force: true });
+  try {
+    if (server) await server.close();
+    await pool.query('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ($1, $2))',
+      [username, requesterName]);
+    await pool.query('DELETE FROM users WHERE username IN ($1, $2)', [username, requesterName]);
+  } finally {
+    await pool.end();
+    if (root) await rm(root, { recursive: true, force: true });
+    if (outside) await rm(outside, { recursive: true, force: true });
+  }
 });
 
 describe('authenticated catalog and local files', () => {
@@ -103,15 +110,20 @@ describe('authenticated catalog and local files', () => {
     expect(detail.statusCode).toBe(200);
     const project = detail.json().project;
     expect(project.files.map((file: { name: string }) => file.name))
-      .toEqual(['part 02.stl', 'part 10.stl']);
-    expect(project.files[0].relativePath).toBe('files/part 02.stl');
-    expect(project.files[0].clientPath).toContain('files/part 02.stl');
-    assetId = project.files[0].id;
-    versionId = project.files[0].versionId;
+      .toEqual(['cover.png', 'part 02.stl', 'part 10.stl']);
+    const part = project.files.find((file: { name: string }) => file.name === 'part 02.stl');
+    expect(part.relativePath).toBe('files/part 02.stl');
+    expect(part.clientPath).toContain('files/part 02.stl');
+    assetId = part.id;
+    versionId = part.versionId;
     expect(versionId).toMatch(/^[0-9a-f-]{36}$/);
     expect((await server.inject({
       method: 'GET', url: `/catalog/assets/${assetId}/download`,
     })).statusCode).toBe(401);
+    const traversal = await server.inject({
+      method: 'GET', url: '/catalog/assets/%2e%2e/download', headers: { cookie: requesterCookie },
+    });
+    expect(traversal.statusCode).not.toBe(200);
     const download = await server.inject({
       method: 'GET', url: `/catalog/assets/${assetId}/download?versionId=${versionId}`,
       headers: { cookie: requesterCookie },
@@ -123,6 +135,19 @@ describe('authenticated catalog and local files', () => {
     });
     expect(preview.statusCode).toBe(200);
     expect(preview.headers['content-type']).toContain('image/svg+xml');
+    const geometry = await server.inject({
+      method: 'GET', url: `/catalog/assets/${assetId}/geometry`, headers: { cookie: requesterCookie },
+    });
+    expect(geometry.statusCode).toBe(200);
+    expect(geometry.json().triangles).toHaveLength(1);
+    expect((await server.inject({
+      method: 'GET', url: `/catalog/assets/${assetId}/geometry`,
+    })).statusCode).toBe(401);
+    const projectPreview = await server.inject({
+      method: 'GET', url: `/catalog/projects/${projectId}/preview`, headers: { cookie: requesterCookie },
+    });
+    expect(projectPreview.statusCode).toBe(200);
+    expect(projectPreview.headers['content-type']).toContain('image/png');
   });
 
   it('enforces operator mutations and preserves metadata and version identity', async () => {
@@ -141,6 +166,10 @@ describe('authenticated catalog and local files', () => {
     })).statusCode).toBe(400);
     expect((await server.inject({
       method: 'PATCH', url, headers: { cookie: operatorCookie },
+      payload: { sourceUrl: 'https://username:password@example.org/model' },
+    })).statusCode).toBe(400);
+    expect((await server.inject({
+      method: 'PATCH', url, headers: { cookie: operatorCookie },
       payload: { description: 'Authored text', tags: ['test'], sourceUrl: 'https://example.org/model' },
     })).statusCode).toBe(200);
     const scan = await indexer.rescan();
@@ -149,8 +178,26 @@ describe('authenticated catalog and local files', () => {
     expect(detail.json().project.description).toBe('Authored text');
     expect(detail.json().project.tags).toEqual(['test']);
     expect(detail.json().project.sourceUrl).toBe('https://example.org/model');
-    expect(detail.json().project.files[0].id).toBe(assetId);
-    expect(detail.json().project.files[0].versionId).toBe(versionId);
+    const part = detail.json().project.files.find((file: { name: string }) => file.name === 'part 02.stl');
+    expect(part.id).toBe(assetId);
+    expect(part.versionId).toBe(versionId);
+  });
+
+  it('falls back to a valid mesh when a preferred cover image becomes malformed', async () => {
+    const cover = path.join(root, rootName, 'Gadgets', 'Desk Lamp', 'cover.png');
+    const valid = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO9ZlHkAAAAASUVORK5CYII=',
+      'base64',
+    );
+    await writeFile(cover, 'not a PNG');
+    expect((await indexer.rescan()).status).toBe('partial');
+    const preview = await server.inject({
+      method: 'GET', url: `/catalog/projects/${projectId}/preview`, headers: { cookie: requesterCookie },
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.headers['content-type']).toContain('image/svg+xml');
+    await writeFile(cover, valid);
+    expect((await indexer.rescan()).status).toBe('succeeded');
   });
 
   it('rejects symlink escapes and marks historical versions unavailable', async () => {
@@ -167,8 +214,9 @@ describe('authenticated catalog and local files', () => {
     const detail = await server.inject({
       method: 'GET', url: `/catalog/projects/${projectId}`, headers: { cookie: operatorCookie },
     });
-    expect(detail.json().project.files[0].id).toBe(assetId);
-    expect(detail.json().project.files[0].versionId).not.toBe(versionId);
+    const part = detail.json().project.files.find((file: { name: string }) => file.name === 'part 02.stl');
+    expect(part.id).toBe(assetId);
+    expect(part.versionId).not.toBe(versionId);
     expect((await server.inject({
       method: 'GET', url: `/catalog/assets/${assetId}/download?versionId=${versionId}`,
       headers: { cookie: operatorCookie },
@@ -188,6 +236,54 @@ describe('authenticated catalog and local files', () => {
     const detail = await server.inject({
       method: 'GET', url: `/catalog/projects/${projectId}`, headers: { cookie: operatorCookie },
     });
-    expect(detail.json().project.files[0].available).toBe(true);
+    const part = detail.json().project.files.find((file: { name: string }) => file.name === 'part 02.stl');
+    expect(part.available).toBe(true);
+  });
+
+  it('keeps household identities and sessions server-enforced', async () => {
+    const me = await server.inject({ method: 'GET', url: '/auth/me', headers: { cookie: requesterCookie } });
+    expect(me.statusCode).toBe(200);
+    expect(me.json().user).toMatchObject({ username: requesterName, role: 'requester' });
+    const invalid = await server.inject({
+      method: 'POST', url: '/auth/login',
+      payload: { username: username, password: 'an incorrect passphrase' },
+    });
+    expect(invalid.statusCode).toBe(401);
+    const boundary = `${rootName}/Gadgets`;
+    expect((await server.inject({
+      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: requesterCookie },
+      payload: { relativePath: boundary, kind: 'collection' },
+    })).statusCode).toBe(403);
+    expect((await server.inject({
+      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      payload: { relativePath: '../outside', kind: 'project' },
+    })).statusCode).toBe(422);
+    expect((await server.inject({
+      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      payload: { relativePath: boundary, kind: 'collection' },
+    })).statusCode).toBe(200);
+    expect((await server.inject({
+      method: 'DELETE', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      payload: { relativePath: boundary },
+    })).statusCode).toBe(204);
+    const logout = await server.inject({
+      method: 'POST', url: '/auth/logout', headers: { cookie: requesterCookie },
+    });
+    expect(logout.statusCode).toBe(204);
+    expect((await server.inject({
+      method: 'GET', url: '/auth/me', headers: { cookie: requesterCookie },
+    })).statusCode).toBe(401);
+  });
+
+  it('reserves sign-in attempts before asynchronous password checks', async () => {
+    const attempts = await Promise.all(Array.from({ length: 12 }, () => server.inject({
+      method: 'POST', url: '/auth/login',
+      payload: { username, password: 'an incorrect passphrase' },
+    })));
+    expect(attempts.filter((response) => response.statusCode === 429).length).toBeGreaterThanOrEqual(3);
+    expect((await server.inject({
+      method: 'POST', url: '/auth/login',
+      payload: { username, password: 'an incorrect passphrase' },
+    })).statusCode).toBe(429);
   });
 });

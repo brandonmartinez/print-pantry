@@ -3,15 +3,18 @@ import type { FileHandle } from 'node:fs/promises';
 const maxMeshBytes = 32 * 1024 * 1024;
 const maxTriangles = 100_000;
 const previewTriangles = 1_500;
-type Point = [number, number, number];
-type Triangle = [Point, Point, Point];
+export type Point = [number, number, number];
+export type Triangle = [Point, Point, Point];
+
+export class InvalidMeshError extends Error {}
+export class MeshChangedError extends Error {}
 
 function project([x, y, z]: Point): [number, number] {
   return [x * .87 - y * .87, x * .5 + y * .5 - z];
 }
 
 function render(triangles: Triangle[]): Buffer {
-  if (!triangles.length) throw new Error('Mesh has no usable triangles');
+  if (!triangles.length) throw new InvalidMeshError('Mesh has no usable triangles');
   const projected = triangles.map((triangle) => triangle.map(project));
   const coordinates = projected.flat();
   const bounds = [
@@ -27,11 +30,11 @@ function render(triangles: Triangle[]): Buffer {
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 224 224" role="img" aria-label="Generated mesh preview"><rect width="224" height="224" fill="#f1f0ea"/><g fill="#c9d9c8" stroke="#526b58" stroke-width=".65" stroke-linejoin="round">${polygons}</g></svg>`);
 }
 
-export async function renderStlPreview(file: FileHandle, size: number): Promise<Buffer> {
-  if (size < 84 || size > maxMeshBytes) throw new Error('Mesh is too large or incomplete for preview');
+export async function readStlTriangles(file: FileHandle, size: number): Promise<Triangle[]> {
+  if (size < 84 || size > maxMeshBytes) throw new InvalidMeshError('Mesh is too large or incomplete for preview');
   const header = Buffer.alloc(84);
   const read = await file.read(header, 0, 84, 0);
-  if (read.bytesRead !== 84) throw new Error('Mesh changed during preview');
+  if (read.bytesRead !== 84) throw new MeshChangedError('Mesh changed during preview');
   const count = header.readUInt32LE(80);
   const binary = count > 0 && count <= maxTriangles && 84 + count * 50 === size;
   const triangles: Triangle[] = [];
@@ -40,19 +43,21 @@ export async function renderStlPreview(file: FileHandle, size: number): Promise<
     const record = Buffer.alloc(50);
     for (let index = 0; index < count; index += stride) {
       const result = await file.read(record, 0, 50, 84 + index * 50);
-      if (result.bytesRead !== 50) throw new Error('Mesh changed during preview');
+      if (result.bytesRead !== 50) throw new MeshChangedError('Mesh changed during preview');
       const triangle = [0, 1, 2].map((vertex) => [0, 1, 2].map((axis) =>
         record.readFloatLE(12 + vertex * 12 + axis * 4)) as Point) as Triangle;
-      if (triangle.flat().every(Number.isFinite)) triangles.push(triangle);
+      if (triangle.flat().every((coordinate) => Number.isFinite(coordinate) && Math.abs(coordinate) <= 1e9)) {
+        triangles.push(triangle);
+      }
     }
   } else {
-    if (size > 8 * 1024 * 1024) throw new Error('ASCII mesh is too large for preview');
+    if (size > 8 * 1024 * 1024) throw new InvalidMeshError('ASCII mesh is too large for preview');
     const text = Buffer.alloc(size);
     const result = await file.read(text, 0, size, 0);
-    if (result.bytesRead !== size) throw new Error('Mesh changed during preview');
+    if (result.bytesRead !== size) throw new MeshChangedError('Mesh changed during preview');
     const ascii = text.toString('utf8');
-    if (!ascii.trimStart().startsWith('solid') || !ascii.includes('endsolid')) {
-      throw new Error('Invalid STL mesh');
+    if (!/^\s*solid\b/i.test(ascii) || !/\bendsolid\b/i.test(ascii)) {
+      throw new InvalidMeshError('Invalid STL mesh');
     }
     const vertices: Point[] = [];
     let count = 0;
@@ -60,15 +65,23 @@ export async function renderStlPreview(file: FileHandle, size: number): Promise<
       vertices.push([Number(match[1]), Number(match[2]), Number(match[3])]);
       if (vertices.length === 3) {
         count++;
-        if (count > maxTriangles) throw new Error('Mesh has too many triangles');
-        if (count <= previewTriangles) triangles.push([...vertices] as Triangle);
+        if (count > maxTriangles) throw new InvalidMeshError('Mesh has too many triangles');
+        if (vertices.flat().every((coordinate) => Number.isFinite(coordinate) && Math.abs(coordinate) <= 1e9) &&
+          count <= previewTriangles) triangles.push([...vertices] as Triangle);
         else if (count % Math.ceil(count / previewTriangles) === 0) {
-          triangles[count % previewTriangles] = [...vertices] as Triangle;
+          if (vertices.flat().every((coordinate) => Number.isFinite(coordinate) && Math.abs(coordinate) <= 1e9)) {
+            triangles[count % previewTriangles] = [...vertices] as Triangle;
+          }
         }
         vertices.length = 0;
       }
     }
-    if (vertices.length) throw new Error('Incomplete STL triangle');
+    if (vertices.length) throw new InvalidMeshError('Incomplete STL triangle');
   }
-  return render(triangles);
+  if (!triangles.length) throw new InvalidMeshError('Mesh has no usable triangles');
+  return triangles;
+}
+
+export async function renderStlPreview(file: FileHandle, size: number): Promise<Buffer> {
+  return render(await readStlTriangles(file, size));
 }

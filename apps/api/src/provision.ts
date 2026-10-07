@@ -9,17 +9,22 @@ async function promptPassword(): Promise<string> {
   process.stdout.write('New password (minimum 12 characters): ');
   process.stdin.setRawMode(true);
   process.stdin.resume();
-  let password = '';
+  const bytes: number[] = [];
   try {
     for await (const chunk of process.stdin) {
       for (const byte of chunk as Buffer) {
         if (byte === 3) throw new Error('Canceled');
         if (byte === 13 || byte === 10) {
           process.stdout.write('\n');
-          return password;
+          return Buffer.from(bytes).toString('utf8');
         }
-        if (byte === 127) password = password.slice(0, -1);
-        else if (byte >= 32 && password.length < 1024) password += String.fromCharCode(byte);
+        if (byte === 127) {
+          while (bytes.length && (bytes.pop()! & 0xc0) === 0x80) { /* remove UTF-8 code point */ }
+        } else {
+          if (byte < 32) throw new Error('Control characters are not allowed in passwords');
+          if (bytes.length >= 1024) throw new Error('Password exceeds 1024 bytes');
+          bytes.push(byte);
+        }
       }
     }
     throw new Error('Password input closed');
@@ -37,13 +42,24 @@ if (!username || !/^[a-z][a-z0-9._-]{2,31}$/.test(username) ||
 }
 const pool = createPool(process.env.DATABASE_URL ?? '');
 try {
-  const existing = await pool.query('SELECT id FROM users LIMIT 1');
-  if (!existing.rows.length && role !== 'operator') throw new Error('The first account must be an operator');
   const passwordHash = await hashPassword(await promptPassword());
-  await pool.query(
-    'INSERT INTO users (id, username, password_hash, role) VALUES ($1, $2, $3, $4)',
-    [randomUUID(), username, passwordHash, role],
-  );
+  const connection = await pool.connect();
+  try {
+    await connection.query('BEGIN');
+    await connection.query("SELECT pg_advisory_xact_lock(hashtext('print_pantry_account_provision'))");
+    const existing = await connection.query('SELECT id FROM users LIMIT 1');
+    if (!existing.rows.length && role !== 'operator') throw new Error('The first account must be an operator');
+    await connection.query(
+      'INSERT INTO users (id, username, password_hash, role) VALUES ($1, $2, $3, $4)',
+      [randomUUID(), username, passwordHash, role],
+    );
+    await connection.query('COMMIT');
+  } catch (error) {
+    await connection.query('ROLLBACK');
+    throw error;
+  } finally {
+    connection.release();
+  }
   process.stdout.write(`Created ${role} account ${username}.\n`);
 } finally {
   await pool.end();

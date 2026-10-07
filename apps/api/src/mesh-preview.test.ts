@@ -2,7 +2,7 @@ import { mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, it } from 'vitest';
-import { renderStlPreview } from './mesh-preview.js';
+import { readStlTriangles, renderStlPreview } from './mesh-preview.js';
 
 it('renders a bounded generated SVG for validated binary STL content', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'pantry-stl-'));
@@ -16,6 +16,7 @@ it('renders a bounded generated SVG for validated binary STL content', async () 
     const handle = await open(file);
     try {
       expect((await renderStlPreview(handle, bytes.length)).toString()).toContain('<polygon');
+      expect(await readStlTriangles(handle, bytes.length)).toHaveLength(1);
       await expect(renderStlPreview(handle, 33 * 1024 * 1024)).rejects.toThrow('too large');
     } finally {
       await handle.close();

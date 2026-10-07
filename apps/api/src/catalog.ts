@@ -1,8 +1,11 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FileHandle } from 'node:fs/promises';
 import type { createPool } from '@print-pantry/db';
-import { clientPath, InvalidLibraryPathError, LibraryUnavailableError, openLibraryFile } from './files.js';
-import { renderStlPreview } from './mesh-preview.js';
+import { Invalid3mfError } from '@print-pantry/indexer';
+import { clientPath, InvalidLibraryPathError, LibraryUnavailableError, openLibraryFile, validateRelativePath } from './files.js';
+import { InvalidMeshError, MeshChangedError, readStlTriangles, renderStlPreview } from './mesh-preview.js';
 import { validatedImageType } from './image-validation.js';
+import { createPreviewLimiter, PreviewBusyError } from './preview-limit.js';
 import type { createAuth } from './auth.js';
 
 type Pool = ReturnType<typeof createPool>;
@@ -15,7 +18,7 @@ export type Indexer = {
   rescan(): Promise<ScanResult>;
   getStatus(): { running: boolean; lastScan: ScanResult | null };
 };
-export type ThumbnailReader = (path: string) => Promise<{ mimeType: string; bytes: Buffer } | null>;
+export type ThumbnailReader = (handle: FileHandle) => Promise<{ mimeType: string; bytes: Buffer } | null>;
 export type CatalogOptions = {
   pool: Pool; root: string; clientMountPrefix?: string; indexer: Indexer;
   read3mfThumbnail?: ThumbnailReader;
@@ -29,8 +32,9 @@ type ProjectRow = {
 };
 type AssetRow = {
   id: string; project_id: string; relative_path: string; project_relative_path: string;
-  name: string; kind: string; extension: string; size_bytes: string | number;
+  name: string; kind: string; extension: string; sort_order: number; size_bytes: string | number;
   mtime_ms: string | number; current_version_id: string | null; missing_at: Date | null;
+  validation_error: string | null;
 };
 type ScanRow = {
   id: string; status: string; started_at: Date; finished_at: Date | null;
@@ -40,8 +44,12 @@ type ScanRow = {
 const uuid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 const idParams = { type: 'object', required: ['id'], properties: { id: { type: 'string', pattern: uuid } } } as const;
 const natural = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+const previewable = `a.current_version_id IS NOT NULL AND
+  NOT EXISTS (SELECT 1 FROM asset_versions v WHERE v.id = a.current_version_id AND v.validation_error IS NOT NULL)
+  AND ((a.kind = 'image' AND lower(a.extension) IN ('.png','.jpg','.jpeg','.gif','.webp'))
+  OR (a.kind = 'mesh' AND lower(a.extension) IN ('.stl','.3mf')))`;
 const searchableProject = `to_tsvector('simple', coalesce(p.name,'') || ' ' || coalesce(p.description,'') ||
-  ' ' || coalesce(array_to_string(p.tags,' '),'') || ' ' || coalesce(p.designer,'') ||
+  ' ' || coalesce(print_pantry_tags_text(p.tags),'') || ' ' || coalesce(p.designer,'') ||
   ' ' || coalesce(p.source_url,'') || ' ' || coalesce(p.license,'') || ' ' ||
   coalesce(p.notes,''))`;
 const searchableCategory = `to_tsvector('simple', coalesce(c.name,'') || ' ' || coalesce(c.relative_path,''))`;
@@ -50,7 +58,8 @@ function safeSource(source: string | null): string | null {
   if (!source) return null;
   try {
     const url = new URL(source);
-    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
+    return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password
+      ? url.href : null;
   } catch { return null; }
 }
 
@@ -93,9 +102,10 @@ async function projectById(pool: Pool, id: string): Promise<ProjectRow | undefin
        p.tags, p.designer, p.source_url, p.license, p.notes, p.missing_at,
        (SELECT count(*)::int FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL) AS asset_count,
        coalesce(
-         (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.missing_at IS NULL),
+         (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.missing_at IS NULL AND ${previewable}),
          (SELECT a.id FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL
-            AND a.kind IN ('image','mesh') ORDER BY CASE WHEN a.kind = 'image' THEN 0 ELSE 1 END, a.relative_path LIMIT 1)
+            AND ${previewable} ORDER BY CASE WHEN a.kind = 'image' THEN 0 WHEN lower(a.extension) = '.stl' THEN 1 ELSE 2 END,
+             a.sort_order LIMIT 1)
        ) AS preview_asset_id
      FROM projects p LEFT JOIN categories c ON c.id = p.category_id WHERE p.id = $1`,
     [id],
@@ -105,8 +115,10 @@ async function projectById(pool: Pool, id: string): Promise<ProjectRow | undefin
 
 async function assetById(pool: Pool, id: string): Promise<AssetRow | undefined> {
   const result = await pool.query<AssetRow>(
-    `SELECT id, project_id, relative_path, project_relative_path, name, kind, extension,
-       size_bytes, mtime_ms, current_version_id, missing_at FROM assets WHERE id = $1`,
+    `SELECT a.id, a.project_id, a.relative_path, a.project_relative_path, a.name, a.kind,
+       a.extension, a.sort_order, a.size_bytes, a.mtime_ms, a.current_version_id,
+       a.missing_at, v.validation_error FROM assets a
+       LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.id = $1`,
     [id],
   );
   return result.rows[0];
@@ -120,19 +132,35 @@ function assetResponse(row: AssetRow, mount?: string) {
     id: row.id, versionId: row.current_version_id, name: row.name,
     relativePath: row.project_relative_path, variant: variantFolders.join('/') || null,
     fileType: row.kind, extension: row.extension, size: Number(row.size_bytes),
-    available: !row.missing_at, clientPath: clientPath(mount, row.relative_path),
+    available: !row.missing_at && !!row.current_version_id,
+    clientPath: clientPath(mount, row.relative_path),
     downloadUrl: `/api/catalog/assets/${row.id}/download`,
-    previewUrl: row.kind === 'image' || row.kind === 'mesh' ?
+    previewUrl: !row.missing_at && !row.validation_error && !!row.current_version_id && ((row.kind === 'image' &&
+      ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(row.extension.toLowerCase())) ||
+      (row.kind === 'mesh' && ['.stl', '.3mf'].includes(row.extension.toLowerCase()))) ?
       `/api/catalog/assets/${row.id}/preview` : null,
+    geometryUrl: !row.missing_at && !row.validation_error && row.kind === 'mesh' &&
+      row.extension.toLowerCase() === '.stl' ?
+      `/api/catalog/assets/${row.id}/geometry` : null,
   };
 }
 
 function libraryError(reply: FastifyReply, error: unknown) {
   if (error instanceof InvalidLibraryPathError) return reply.code(422).send({ error: error.message });
+  if (error instanceof InvalidMeshError) return reply.code(422).send({ error: error.message });
+  if (error instanceof Invalid3mfError) return reply.code(422).send({ error: 'Invalid or unsupported 3MF preview' });
+  if (error instanceof MeshChangedError) return reply.code(409).send({ error: error.message });
+  if (error instanceof PreviewBusyError) {
+    reply.header('Retry-After', '2');
+    return reply.code(503).send({ error: error.message });
+  }
   if (error instanceof LibraryUnavailableError) return reply.code(503).send({ error: error.message });
   if (error instanceof Error && 'code' in error &&
     (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
     return reply.code(410).send({ error: 'File is no longer available; rescan the library' });
+  }
+  if (error instanceof Error && 'code' in error && error.code === 'ELOOP') {
+    return reply.code(422).send({ error: 'Symlinked library paths are not allowed' });
   }
   if (error instanceof Error && 'code' in error &&
     (error.code === 'EACCES' || error.code === 'EIO' || error.code === 'ENETUNREACH')) {
@@ -143,6 +171,7 @@ function libraryError(reply: FastifyReply, error: unknown) {
 
 export function registerCatalog(server: FastifyInstance, options: CatalogOptions, auth: Auth) {
   const { pool, root, indexer, clientMountPrefix: mount } = options;
+  const preview = createPreviewLimiter();
   let rescanPending = false;
 
   server.get('/catalog/status', { preHandler: auth.authenticate }, async () => {
@@ -199,9 +228,10 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
            p.tags, p.designer, p.source_url, p.license, p.notes, p.missing_at,
            (SELECT count(*)::int FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL) AS asset_count,
            coalesce(
-             (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.missing_at IS NULL),
+             (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.missing_at IS NULL AND ${previewable}),
              (SELECT a.id FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL
-                AND a.kind IN ('image','mesh') ORDER BY CASE WHEN a.kind = 'image' THEN 0 ELSE 1 END, a.relative_path LIMIT 1)
+                AND ${previewable} ORDER BY CASE WHEN a.kind = 'image' THEN 0 WHEN lower(a.extension) = '.stl' THEN 1 ELSE 2 END,
+                 a.sort_order LIMIT 1)
            ) AS preview_asset_id
          FROM projects p LEFT JOIN categories c ON c.id = p.category_id
          WHERE ${where} ORDER BY lower(p.name), p.id LIMIT $4 OFFSET $5`,
@@ -225,14 +255,17 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     const row = await projectById(pool, request.params.id);
     if (!row) return reply.code(404).send({ error: 'Project not found' });
     const assets = await pool.query<AssetRow>(
-      `SELECT id, project_id, relative_path, project_relative_path, name, kind, extension,
-         size_bytes, mtime_ms, current_version_id, missing_at FROM assets WHERE project_id = $1`,
+      `SELECT a.id, a.project_id, a.relative_path, a.project_relative_path, a.name, a.kind,
+         a.extension, a.sort_order, a.size_bytes, a.mtime_ms, a.current_version_id,
+         a.missing_at, v.validation_error FROM assets a
+         LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.project_id = $1`,
       [row.id],
     );
     return { project: {
       ...summary(row, mount), designer: row.designer, sourceUrl: safeSource(row.source_url),
       license: row.license, notes: row.notes,
-      files: assets.rows.sort((a, b) => natural.compare(a.project_relative_path, b.project_relative_path))
+      files: assets.rows.sort((a, b) =>
+        a.sort_order - b.sort_order || natural.compare(a.project_relative_path, b.project_relative_path))
         .map((asset) => assetResponse(asset, mount)),
     } };
   });
@@ -277,25 +310,70 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     return { project: summary(project!, mount) };
   });
 
-  server.put<{ Body: { projectId: string; isBoundary: boolean } }>('/catalog/boundaries', {
+  server.put<{ Body: { projectId: string; isBoundary: boolean } |
+    { relativePath: string; kind: 'project' | 'collection' } }>('/catalog/boundaries', {
     preHandler: auth.operatorOnly,
     schema: { body: {
-      type: 'object', additionalProperties: false, required: ['projectId', 'isBoundary'],
-      properties: { projectId: { type: 'string', pattern: uuid }, isBoundary: { type: 'boolean' } },
+      oneOf: [
+        {
+          type: 'object', additionalProperties: false, required: ['projectId', 'isBoundary'],
+          properties: { projectId: { type: 'string', pattern: uuid }, isBoundary: { type: 'boolean' } },
+        },
+        {
+          type: 'object', additionalProperties: false, required: ['relativePath', 'kind'],
+          properties: {
+            relativePath: { type: 'string', minLength: 1, maxLength: 2048 },
+            kind: { type: 'string', enum: ['project', 'collection'] },
+          },
+        },
+      ],
     } },
   }, async (request, reply) => {
-    const project = await projectById(pool, request.body.projectId);
-    if (!project) return reply.code(404).send({ error: 'Project not found' });
-    if (request.body.isBoundary) {
+    let relativePath: string;
+    let kind: 'project' | 'collection' = 'project';
+    let isBoundary = true;
+    let projectId: string | null = null;
+    if ('projectId' in request.body) {
+      const project = await projectById(pool, request.body.projectId);
+      if (!project) return reply.code(404).send({ error: 'Project not found' });
+      relativePath = project.relative_path;
+      isBoundary = request.body.isBoundary;
+      projectId = project.id;
+    } else {
+      relativePath = request.body.relativePath;
+      kind = request.body.kind;
+    }
+    try {
+      validateRelativePath(relativePath);
+    } catch (error) {
+      return libraryError(reply, error);
+    }
+    if (isBoundary) {
       await pool.query(
-        `INSERT INTO project_boundary_overrides (relative_path, kind) VALUES ($1, 'project')
-         ON CONFLICT (relative_path) DO UPDATE SET kind = 'project'`,
-        [project.relative_path],
+        `INSERT INTO project_boundary_overrides (relative_path, kind) VALUES ($1, $2)
+         ON CONFLICT (relative_path) DO UPDATE SET kind = EXCLUDED.kind`,
+        [relativePath, kind],
       );
     } else {
-      await pool.query('DELETE FROM project_boundary_overrides WHERE relative_path = $1', [project.relative_path]);
+      await pool.query('DELETE FROM project_boundary_overrides WHERE relative_path = $1', [relativePath]);
     }
-    return { projectId: project.id, isBoundary: request.body.isBoundary };
+    return { projectId, relativePath, kind, isBoundary };
+  });
+
+  server.delete<{ Body: { relativePath: string } }>('/catalog/boundaries', {
+    preHandler: auth.operatorOnly,
+    schema: { body: {
+      type: 'object', additionalProperties: false, required: ['relativePath'],
+      properties: { relativePath: { type: 'string', minLength: 1, maxLength: 2048 } },
+    } },
+  }, async (request, reply) => {
+    try {
+      validateRelativePath(request.body.relativePath);
+    } catch (error) {
+      return libraryError(reply, error);
+    }
+    await pool.query('DELETE FROM project_boundary_overrides WHERE relative_path = $1', [request.body.relativePath]);
+    return reply.code(204).send();
   });
 
   server.get<{ Params: { id: string }; Querystring: { versionId?: string } }>('/catalog/assets/:id/download', {
@@ -334,8 +412,9 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
 
   async function servePreview(asset: AssetRow, reply: FastifyReply) {
     if (asset.missing_at || !asset.current_version_id) return reply.code(410).send({ error: 'Preview source is unavailable' });
+    if (asset.validation_error) return reply.code(422).send({ error: 'Indexed preview is invalid; inspect scan status' });
     try {
-      const { handle, stats, canonicalFile } = await openLibraryFile(root, asset.relative_path);
+      const { handle, stats } = await openLibraryFile(root, asset.relative_path);
       try {
         if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
           return reply.code(409).send({ error: 'Preview source changed since indexing' });
@@ -354,7 +433,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
           bytes = await renderStlPreview(handle, stats.size);
           mimeType = 'image/svg+xml';
         } else if (asset.extension.toLowerCase() === '.3mf' && options.read3mfThumbnail) {
-          const thumbnail = await options.read3mfThumbnail(canonicalFile);
+          const thumbnail = await options.read3mfThumbnail(handle);
           if (!thumbnail) return reply.code(422).send({ error: 'No validated 3MF thumbnail is available' });
           bytes = thumbnail.bytes;
           mimeType = thumbnail.mimeType;
@@ -377,7 +456,41 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
   }, async (request, reply) => {
     const asset = await assetById(pool, request.params.id);
     if (!asset) return reply.code(404).send({ error: 'Asset not found' });
-    return servePreview(asset, reply);
+    try {
+      return await preview(() => servePreview(asset, reply));
+    } catch (error) {
+      return libraryError(reply, error);
+    }
+  });
+
+  server.get<{ Params: { id: string } }>('/catalog/assets/:id/geometry', {
+    preHandler: auth.authenticate, schema: { params: idParams },
+  }, async (request, reply) => {
+    const asset = await assetById(pool, request.params.id);
+    if (!asset) return reply.code(404).send({ error: 'Asset not found' });
+    if (asset.missing_at || !asset.current_version_id) {
+      return reply.code(410).send({ error: 'Mesh source is unavailable' });
+    }
+    if (asset.kind !== 'mesh' || asset.extension.toLowerCase() !== '.stl') {
+      return reply.code(415).send({ error: 'Interactive preview currently supports STL meshes' });
+    }
+    try {
+      return await preview(async () => {
+        const { handle, stats } = await openLibraryFile(root, asset.relative_path);
+        try {
+          if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
+            return reply.code(409).send({ error: 'Mesh changed since indexing; rescan before previewing' });
+          }
+          const triangles = await readStlTriangles(handle, stats.size);
+          reply.header('Cache-Control', 'private, max-age=300');
+          return { triangles, sampled: true };
+        } finally {
+          await handle.close();
+        }
+      });
+    } catch (error) {
+      return libraryError(reply, error);
+    }
   });
 
   server.get<{ Params: { id: string } }>('/catalog/projects/:id/preview', {
@@ -388,6 +501,10 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     if (!project.preview_asset_id) return reply.code(404).send({ error: 'No preview is available' });
     const asset = await assetById(pool, project.preview_asset_id);
     if (!asset) return reply.code(404).send({ error: 'Preview asset not found' });
-    return servePreview(asset, reply);
+    try {
+      return await preview(() => servePreview(asset, reply));
+    } catch (error) {
+      return libraryError(reply, error);
+    }
   });
 }

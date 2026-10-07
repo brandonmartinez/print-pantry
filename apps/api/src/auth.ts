@@ -102,6 +102,9 @@ export function createAuth(server: FastifyInstance, pool: Pool, secureCookie: bo
       reply.header('Retry-After', Math.ceil((attempt.expiresAt - now) / 1000));
       return reply.code(429).send({ error: 'Too many sign-in attempts; try again later' });
     }
+    loginAttempts.set(address, {
+      count: (attempt?.count ?? 0) + 1, expiresAt: attempt?.expiresAt ?? now + loginWindowMs,
+    });
     const username = request.body.username.trim().toLowerCase();
     const result = await pool.query<Account>(
       'SELECT id, username, role, password_hash FROM users WHERE username = $1', [username],
@@ -109,9 +112,6 @@ export function createAuth(server: FastifyInstance, pool: Pool, secureCookie: bo
     const account = result.rows[0];
     const valid = await verifyPassword(request.body.password, account?.password_hash ?? dummyPasswordHash);
     if (!account || !valid) {
-      loginAttempts.set(address, {
-        count: (attempt?.count ?? 0) + 1, expiresAt: attempt?.expiresAt ?? now + loginWindowMs,
-      });
       return reply.code(401).send({ error: 'Invalid username or password' });
     }
     loginAttempts.delete(address);

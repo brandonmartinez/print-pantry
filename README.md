@@ -71,6 +71,10 @@ starts, and operator-only `POST /api/catalog/rescan` starts a manual scan;
 `GET /api/catalog/status` exposes scan failures and timestamps. Failed,
 partial, or offline scans do not mark every file missing. The database retains
 stable IDs, historical versions, and user-authored metadata when files change.
+An unexpectedly empty previously populated mount is treated as non-authoritative,
+including when placeholder directories remain. Set `LIBRARY_ALLOW_EMPTY=true`
+**only** if the mount is known healthy and you intentionally want a completely
+empty library to mark prior entries missing; the default is safer for a NAS.
 Boundary overrides and metadata edits require the operator role; changing a
 boundary takes effect on the next rescan. Scanning never moves, renames, or
 deletes library files.
@@ -91,18 +95,26 @@ when deploying behind private HTTPS (the development container uses HTTP).
 Do not publish the app directly to the internet.
 
 Authenticated `GET /api/catalog/projects` accepts `q`, `category`,
-`fileType`, `page`, and `pageSize` (at most 50). `GET
-/api/catalog/projects/:id` returns associated files, source metadata, and
+`fileType`, `page`, and `pageSize` (at most 50).
+`GET /api/catalog/projects/:id` returns associated files, source metadata, and
 stable asset/version IDs. File downloads use
 `GET /api/catalog/assets/:id/download`; requesting an unavailable historical
 version returns 410 rather than silently substituting a different file.
 Operator metadata edits use `PATCH /api/catalog/projects/:id`; explicit
 project-boundary overrides use `PUT /api/catalog/boundaries`. Authentication
 uses `/api/auth/login`, `/api/auth/me`, and `/api/auth/logout`. Frontend and
-external clients must forward the session cookie. Generated STL previews,
-validated image content, and embedded 3MF thumbnails are served only through
-authenticated routes with bounded processing; unsupported source files remain
-downloadable. This phase does not scrape external metadata or upload files.
+external clients must forward the session cookie. Generated STL thumbnails,
+validated images, embedded 3MF thumbnails, and the lazy, sampled interactive
+STL geometry endpoint are served only through authenticated routes with
+bounded processing; unsupported source files remain downloadable. This phase
+does not scrape external metadata or upload files.
+
+The operator UI can mark a project folder as an explicit boundary. For a deeper
+collection that the default grouping misclassifies, the same operator-only
+boundary endpoint also accepts `{"relativePath":"Category/Collection","kind":"collection"}`
+or `"kind":"project"`; `DELETE /api/catalog/boundaries` with the same
+`relativePath` removes an override. These are library-relative directory
+paths, not absolute host paths. Rescan after changing a boundary.
 
 For backups, stop writes and back up the PostgreSQL database **as well as**
 the separately maintained library. Verify the database backup by restoring

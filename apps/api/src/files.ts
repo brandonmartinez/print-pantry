@@ -41,10 +41,12 @@ export async function openLibraryFile(root: string, relativePath: string) {
     throw error;
   }
   let cursor = canonicalRoot;
+  const expected: Array<{ path: string; dev: number; ino: number }> = [];
   for (const part of parts) {
     cursor = path.join(cursor, part);
     const stats = await lstat(cursor);
     if (stats.isSymbolicLink()) throw new InvalidLibraryPathError();
+    expected.push({ path: cursor, dev: stats.dev, ino: stats.ino });
   }
   const canonicalFile = await realpath(cursor);
   if (!canonicalFile.startsWith(canonicalRoot + path.sep)) throw new InvalidLibraryPathError();
@@ -52,6 +54,16 @@ export async function openLibraryFile(root: string, relativePath: string) {
   try {
     const stats = await handle.stat();
     if (!stats.isFile()) throw new InvalidLibraryPathError();
+    const final = expected[expected.length - 1];
+    if (final.dev !== stats.dev || final.ino !== stats.ino || await realpath(cursor) !== canonicalFile) {
+      throw new InvalidLibraryPathError();
+    }
+    for (const entry of expected) {
+      const current = await lstat(entry.path);
+      if (current.isSymbolicLink() || current.dev !== entry.dev || current.ino !== entry.ino) {
+        throw new InvalidLibraryPathError();
+      }
+    }
     return { handle, stats, canonicalFile };
   } catch (error) {
     await handle.close();

@@ -1,5 +1,5 @@
 import { createDatabase, createPool } from '@print-pantry/db';
-import { createLibraryIndexer, read3mfThumbnail } from '@print-pantry/indexer';
+import { createLibraryIndexer, read3mfThumbnailFromHandle } from '@print-pantry/indexer';
 import { clientPath } from './files.js';
 import { buildServer } from './server.js';
 
@@ -12,6 +12,10 @@ if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes
 }
 const cookieSecure = process.env.COOKIE_SECURE ?? 'false';
 if (cookieSecure !== 'true' && cookieSecure !== 'false') throw new Error('COOKIE_SECURE must be true or false');
+const allowEmptyLibrary = process.env.LIBRARY_ALLOW_EMPTY ?? 'false';
+if (allowEmptyLibrary !== 'true' && allowEmptyLibrary !== 'false') {
+  throw new Error('LIBRARY_ALLOW_EMPTY must be true or false');
+}
 const ignoredDirectoryNames = (process.env.LIBRARY_IGNORED_DIRS ?? '').split(',').map((name) => name.trim()).filter(Boolean);
 for (const name of ignoredDirectoryNames) {
   if (name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
@@ -21,11 +25,11 @@ for (const name of ignoredDirectoryNames) {
 if (process.env.CLIENT_MOUNT_PREFIX) clientPath(process.env.CLIENT_MOUNT_PREFIX, 'configuration-check');
 const indexer = createLibraryIndexer({
   db: createDatabase(pool), root, ignoredDirectoryNames,
-  hashConcurrency: 2,
+  hashConcurrency: 2, allowEmptyLibrary: allowEmptyLibrary === 'true',
 });
 const server = buildServer(pool, {
   pool, root, clientMountPrefix: process.env.CLIENT_MOUNT_PREFIX,
-  indexer, read3mfThumbnail, secureCookie: cookieSecure === 'true',
+  indexer, read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: cookieSecure === 'true',
 });
 const port = Number(process.env.API_PORT ?? 3000);
 
