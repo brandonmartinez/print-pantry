@@ -110,13 +110,17 @@ first household account interactively:
 
 ```sh
 docker compose -p <composeproject> -f compose.prod.yml exec -it api \
-  node apps/api/dist/provision.js operator operator
+  sh deploy/entrypoint.sh node apps/api/dist/provision.js operator operator
 ```
 
 This command prompts for a password on a TTY and never accepts it as an
 argument. The first account must be an operator. Replace the final role with
 `requester` for later requester accounts. Do not paste passwords into shell
-history, Compose environment files, or automation.
+history, Compose environment files, or automation. The entrypoint loads the
+secret-derived `DATABASE_URL` for the exec process; it is required for the
+internal password-file mode and is safe to use as the shared command for the
+external-database mode. The migration `run` commands already invoke this
+entrypoint automatically.
 
 Finally, sign in through the private HTTPS origin, confirm API readiness, and
 perform an operator rescan. A healthy empty library is only authoritative when
