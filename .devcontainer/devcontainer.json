@@ -1,0 +1,13 @@
+{
+  "name": "Print Pantry",
+  "dockerComposeFile": "../compose.dev.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "node",
+  "overrideCommand": false,
+  "forwardPorts": [5173, 3000],
+  "portsAttributes": {
+    "5173": { "label": "Print Pantry web" },
+    "3000": { "label": "Print Pantry API" }
+  }
+}

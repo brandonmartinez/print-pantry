@@ -1,0 +1,57 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ${HOST_NPM_PROXY_ENV_FILE:-./.devcontainer/proxy.env.example}
+    environment:
+      DATABASE_URL: postgresql://pantry:development-only@db:5432/print_pantry_dev
+      TEST_DATABASE_URL: postgresql://pantry:development-only@db:5432/print_pantry_test
+      API_PORT: "3000"
+      WEB_PORT: "5173"
+      NPM_CONFIG_USERCONFIG: /home/node/.npmrc
+      NPM_CONFIG_CAFILE: ${HOST_NPM_CA_FILE:+/run/pantry-npm-ca.pem}
+      NODE_EXTRA_CA_CERTS: ${HOST_NPM_CA_FILE:+/run/pantry-npm-ca.pem}
+      SSH_ALLOW_AGENT_FORWARDING: ${SSH_ALLOW_AGENT_FORWARDING:-false}
+    volumes:
+      - .:/workspace
+      - pantry_node_modules:/workspace/node_modules
+      - pantry_npm_cache:/home/node/.npm
+      - pantry_ssh_host_keys:/var/lib/ssh-host-keys
+      - ${SSH_AUTHORIZED_KEYS_FILE:-./.devcontainer/authorized_keys.example}:/run/pantry-authorized-keys:ro
+      - ${HOST_NPM_CONFIG_FILE:?Set HOST_NPM_CONFIG_FILE to your existing external npm user config}:/home/node/.npmrc:ro
+      - ${HOST_NPM_CA_FILE:-./.devcontainer/ca.example.pem}:/run/pantry-npm-ca.pem:ro
+      - ${LIBRARY_HOST_PATH:-./.devcontainer/empty-library}:/mnt/library:ro
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-5173}:5173"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-3000}:3000"
+      - "${SSH_BIND_ADDRESS:-127.0.0.1}:${SSH_PORT:-2222}:22"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+  db:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_USER: pantry
+      POSTGRES_PASSWORD: development-only
+      POSTGRES_DB: print_pantry_dev
+    volumes:
+      - pantry_pg_data:/var/lib/postgresql/data
+      - ./.devcontainer/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pantry -d print_pantry_dev"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  pantry_node_modules:
+  pantry_npm_cache:
+  pantry_ssh_host_keys:
+  pantry_pg_data:

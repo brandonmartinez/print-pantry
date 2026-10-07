@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+**/dist
+.devcontainer/authorized_keys
+.devcontainer/proxy.env
+.devcontainer/npmrc
+.devcontainer/ca.pem
