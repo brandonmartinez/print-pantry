@@ -376,13 +376,33 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .file-copy strong { overflow-wrap: anywhere; color: #364239; font-size: .81rem; font-weight: 600; }
 .file-path { overflow: hidden; color: #82897f; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
 .file-meta { color: #80887e; font-size: .66rem; }
-.file-actions { display: flex; align-items: center; gap: .35rem; }
+.file-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .35rem; }
 .file-actions .path-control { display: contents; }
 .file-actions .path-feedback { position: absolute; z-index: 1; max-width: 210px; transform: translateY(2.4rem); }
 .file-actions .fallback-path { position: absolute; z-index: 1; width: min(280px, 80vw); margin-top: 5.8rem; }
 .file-actions .fallback-path input { margin-top: .3rem; }
 .file-no-download { font-size: .68rem; }
 .unavailable-label { color: #9a533d; font-size: .73rem; font-weight: 600; white-space: nowrap; }
+.mesh-preview-control { display: flex; min-width: 0; flex: 0 0 auto; align-items: start; flex-direction: column; gap: .4rem; }
+.mesh-preview-open { flex-basis: 100%; }
+.mesh-unavailable { color: #858b81; font-size: .68rem; }
+.mesh-state { margin: .2rem 0; color: #6f7d6d; font-size: .75rem; }
+.mesh-error { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+.mesh-error p { margin: .2rem 0; color: #8e4c36; font-size: .75rem; }
+.mesh-viewer { width: min(100%, 720px); margin: .25rem 0 .15rem; }
+.mesh-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 2 / 1;
+  border: 1px solid #dfe4d8;
+  border-radius: 9px;
+  background: #f3f4ec;
+  cursor: grab;
+  touch-action: none;
+}
+.mesh-canvas:active { cursor: grabbing; }
+.mesh-viewer figcaption { margin-top: .35rem; color: #778174; font-size: .68rem; line-height: 1.4; }
 .detail-aside { display: flex; flex-direction: column; gap: .85rem; }
 .info-card { padding: 1.05rem; border: 1px solid #e7e8e0; border-radius: 11px; background: #fff; }
 .info-card h2 { margin: 0; font-family: var(--serif); font-size: 1.15rem; font-weight: 500; }

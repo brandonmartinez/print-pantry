@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 type User = { id: string; username: string; role: 'operator' | 'member' | string };
 type Scan = {
@@ -35,7 +35,11 @@ type ProjectFile = {
   clientPath?: string | null;
   downloadUrl?: string | null;
   previewUrl?: string | null;
+  geometryUrl?: string | null;
 };
+type Point3D = [number, number, number];
+type Triangle = [Point3D, Point3D, Point3D];
+type MeshGeometry = { triangles: Triangle[]; sampled: boolean };
 type CatalogResponse = {
   items: Project[];
   total: number;
@@ -107,6 +111,211 @@ function formatDate(value?: string | null): string | undefined {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return undefined;
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function isPoint3D(value: unknown): value is Point3D {
+  return Array.isArray(value)
+    && value.length === 3
+    && value.every((coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate));
+}
+
+function parseMeshGeometry(value: unknown): MeshGeometry {
+  if (!value || typeof value !== 'object') throw new Error('The preview response was invalid.');
+  const response = value as { triangles?: unknown; sampled?: unknown };
+  if (!Array.isArray(response.triangles) || response.triangles.length === 0 || response.triangles.length > 1500) {
+    throw new Error('No supported mesh geometry was returned.');
+  }
+  const triangles: Triangle[] = [];
+  for (const triangle of response.triangles) {
+    if (!Array.isArray(triangle) || triangle.length !== 3 || !triangle.every(isPoint3D)) {
+      throw new Error('The preview contained invalid mesh geometry.');
+    }
+    triangles.push([triangle[0], triangle[1], triangle[2]]);
+  }
+  return { triangles, sampled: response.sampled === true };
+}
+
+function InteractiveMesh({ fileName, geometry }: { fileName: string; geometry: MeshGeometry }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const dragRef = useRef<{ x: number; y: number } | null>(null);
+  const instructionsId = useId();
+  const [rotation, setRotation] = useState({ x: -0.32, y: 0.48 });
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) return;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = '#f3f4ec';
+    context.fillRect(0, 0, width, height);
+
+    const points = geometry.triangles.flat();
+    const bounds = [0, 1, 2].map((axis) => {
+      const coordinates = points.map((point) => point[axis]);
+      return [Math.min(...coordinates), Math.max(...coordinates)];
+    });
+    const center = bounds.map(([minimum, maximum]) => (minimum + maximum) / 2);
+    const extent = Math.max(...bounds.map(([minimum, maximum]) => maximum - minimum), 1);
+    const scale = Math.min(width, height) * 0.62 / extent;
+    const cosX = Math.cos(rotation.x);
+    const sinX = Math.sin(rotation.x);
+    const cosY = Math.cos(rotation.y);
+    const sinY = Math.sin(rotation.y);
+    const faces = geometry.triangles.map((triangle) => {
+      const projected = triangle.map(([x, y, z]) => {
+        const centeredX = (x - center[0]) * scale;
+        const centeredY = (y - center[1]) * scale;
+        const centeredZ = (z - center[2]) * scale;
+        const rotatedX = centeredX * cosY + centeredZ * sinY;
+        const rotatedZ = -centeredX * sinY + centeredZ * cosY;
+        const rotatedY = centeredY * cosX - rotatedZ * sinX;
+        return {
+          x: width / 2 + rotatedX,
+          y: height / 2 - rotatedY,
+          depth: centeredY * sinX + rotatedZ * cosX,
+        };
+      });
+      return { points: projected, depth: projected.reduce((sum, point) => sum + point.depth, 0) / 3 };
+    }).sort((left, right) => left.depth - right.depth);
+
+    for (const face of faces) {
+      context.beginPath();
+      context.moveTo(face.points[0].x, face.points[0].y);
+      context.lineTo(face.points[1].x, face.points[1].y);
+      context.lineTo(face.points[2].x, face.points[2].y);
+      context.closePath();
+      context.fillStyle = '#709176';
+      context.fill();
+      context.strokeStyle = '#486750';
+      context.lineWidth = 1;
+      context.stroke();
+    }
+  }, [geometry, rotation]);
+
+  function onPointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
+    event.preventDefault();
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    event.currentTarget.focus();
+    if (typeof event.currentTarget.setPointerCapture === 'function') {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+  }
+
+  function onPointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
+    const previous = dragRef.current;
+    if (!previous) return;
+    const deltaX = event.clientX - previous.x;
+    const deltaY = event.clientY - previous.y;
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    setRotation((current) => ({
+      x: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, current.x + deltaY * 0.01)),
+      y: current.y + deltaX * 0.01,
+    }));
+  }
+
+  function onKeyDown(event: React.KeyboardEvent<HTMLCanvasElement>) {
+    const step = 0.12;
+    const directions: Record<string, { x: number; y: number }> = {
+      ArrowLeft: { x: 0, y: -step },
+      ArrowRight: { x: 0, y: step },
+      ArrowUp: { x: -step, y: 0 },
+      ArrowDown: { x: step, y: 0 },
+    };
+    const direction = directions[event.key];
+    if (!direction) return;
+    event.preventDefault();
+    setRotation((current) => ({
+      x: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, current.x + direction.x)),
+      y: current.y + direction.y,
+    }));
+  }
+
+  return (
+    <figure className="mesh-viewer">
+      <canvas
+        aria-describedby={instructionsId}
+        aria-label={`Interactive 3D preview of ${fileName}. Use arrow keys or pointer drag to rotate.`}
+        className="mesh-canvas"
+        data-rotation-x={rotation.x.toFixed(2)}
+        data-rotation-y={rotation.y.toFixed(2)}
+        height={360}
+        onKeyDown={onKeyDown}
+        onPointerCancel={() => { dragRef.current = null; }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={() => { dragRef.current = null; }}
+        role="img"
+        tabIndex={0}
+        ref={canvasRef}
+        width={720}
+      />
+      <figcaption id={instructionsId}>
+        Drag to rotate, or focus the preview and use the arrow keys.
+        {geometry.sampled && <span> This lightweight view uses sampled geometry.</span>}
+      </figcaption>
+    </figure>
+  );
+}
+
+function StlPreview({ file }: { file: ProjectFile }) {
+  const geometryUrl = safeSameOriginUrl(file.geometryUrl);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [geometry, setGeometry] = useState<MeshGeometry | null>(null);
+  const [error, setError] = useState('');
+
+  async function loadGeometry() {
+    if (!geometryUrl) return;
+    setLoading(true);
+    setError('');
+    try {
+      const response = await apiRequest<unknown>(geometryUrl);
+      setGeometry(parseMeshGeometry(response));
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function togglePreview() {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (!geometry) void loadGeometry();
+  }
+
+  if (file.fileType.toLowerCase() !== 'stl') return null;
+  if (!geometryUrl) {
+    return <span className="mesh-unavailable" role="status">3D preview unavailable</span>;
+  }
+
+  return (
+    <div className={`mesh-preview-control ${open ? 'mesh-preview-open' : ''}`}>
+      <button
+        aria-label={`${open ? 'Hide' : 'Explore'} 3D preview for ${file.name}`}
+        className="button button-small button-outline"
+        disabled={loading}
+        onClick={togglePreview}
+        type="button"
+      >
+        {loading ? 'Loading 3D…' : open ? 'Hide 3D' : 'Explore 3D'}
+      </button>
+      {open && loading && <p className="mesh-state" role="status">Loading 3D preview…</p>}
+      {open && error && (
+        <div className="mesh-error">
+          <p role="alert">3D preview could not be loaded: {error}</p>
+          <button className="button button-small button-quiet" onClick={() => void loadGeometry()} type="button">Retry preview</button>
+        </div>
+      )}
+      {open && geometry && <InteractiveMesh fileName={file.name} geometry={geometry} />}
+    </div>
+  );
 }
 
 function LoginForm({
@@ -456,6 +665,7 @@ function ProjectDetail({
                           {downloadUrl
                             ? <a className="button button-small button-primary" href={downloadUrl} download>Download</a>
                             : <span className="quiet file-no-download">Download unavailable</span>}
+                          <StlPreview file={file} />
                         </div>
                         : <span className="unavailable-label">Source unavailable</span>}
                     </li>

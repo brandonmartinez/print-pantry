@@ -34,6 +34,7 @@ const detail = {
       clientPath: '/print-library/Home/Desk Organizer/Parts/part-10.stl',
       downloadUrl: '/api/catalog/assets/asset-10/download',
       previewUrl: null,
+      geometryUrl: '/api/catalog/assets/asset-10/geometry',
     },
     {
       id: 'asset-2',
@@ -47,6 +48,7 @@ const detail = {
       clientPath: '/print-library/Home/Desk Organizer/Parts/part-2.stl',
       downloadUrl: '/api/catalog/assets/asset-2/download',
       previewUrl: null,
+      geometryUrl: '/api/catalog/assets/asset-2/geometry',
     },
     {
       id: 'asset-missing',
@@ -96,6 +98,12 @@ function mockApi(role: 'operator' | 'member' = 'member') {
       }
       if (selectedCategory || selectedFileType) return jsonResponse(listResponse(1, [project], 1));
       return jsonResponse(listResponse(1, [project, { ...project, id: 'vase', name: 'Ceramic Vase' }], 13));
+    }
+    if (path === '/api/catalog/assets/asset-2/geometry') {
+      return jsonResponse({
+        triangles: [[[0, 0, 0], [1, 0, 0], [0, 1, 0]]],
+        sampled: true,
+      });
     }
     if (path === '/api/catalog/projects/desk-organizer') return jsonResponse({ project: detail });
     if (path === '/api/catalog/projects/desk-organizer' && method === 'PATCH') return jsonResponse({ project: detail });
@@ -162,6 +170,30 @@ it('shows a naturally ordered project detail with file paths and download action
   expect(screen.getAllByRole('link', { name: 'Download' })[0].getAttribute('href')).toBe('/api/catalog/assets/asset-2/download');
   expect(screen.getByText('Source unavailable')).toBeTruthy();
   expect(screen.getByText('Pantry Studio')).toBeTruthy();
+});
+
+it('loads mesh geometry only on demand and supports keyboard and pointer rotation', async () => {
+  const { calls } = await signIn();
+  fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
+  await screen.findByRole('heading', { name: 'Desk Organizer' });
+  expect(calls.filter(({ path }) => path.endsWith('/geometry'))).toHaveLength(0);
+
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => null);
+  const exploreButton = await screen.findByRole('button', { name: 'Explore 3D preview for part-2.stl' });
+  fireEvent.click(exploreButton);
+  const canvas = await screen.findByRole('img', { name: /Interactive 3D preview of part-2\.stl/ });
+  expect(calls.filter(({ path }) => path === '/api/catalog/assets/asset-2/geometry')).toHaveLength(1);
+  expect(screen.getByText(/Drag to rotate, or focus the preview/)).toBeTruthy();
+  expect(canvas.getAttribute('data-rotation-y')).toBe('0.48');
+
+  fireEvent.keyDown(canvas, { key: 'ArrowRight' });
+  expect(canvas.getAttribute('data-rotation-y')).not.toBe('0.48');
+  const keyboardRotation = Number(canvas.getAttribute('data-rotation-y'));
+
+  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 10, clientY: 10 });
+  fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 40, clientY: 30 });
+  expect(Number(canvas.getAttribute('data-rotation-y'))).not.toBe(keyboardRotation);
+  fireEvent.pointerUp(canvas, { pointerId: 1 });
 });
 
 it('copies project and file paths when clipboard access succeeds', async () => {
