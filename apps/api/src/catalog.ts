@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { FileHandle } from 'node:fs/promises';
 import type { createPool } from '@print-pantry/db';
@@ -34,7 +35,7 @@ type AssetRow = {
   id: string; project_id: string; relative_path: string; project_relative_path: string;
   name: string; kind: string; extension: string; sort_order: number; size_bytes: string | number;
   mtime_ms: string | number; current_version_id: string | null; missing_at: Date | null;
-  validation_error: string | null;
+  validation_error: string | null; content_hash: string | null;
 };
 type ScanRow = {
   id: string; status: string; started_at: Date; finished_at: Date | null;
@@ -119,7 +120,7 @@ async function assetById(pool: Pool, id: string): Promise<AssetRow | undefined> 
   const result = await pool.query<AssetRow>(
     `SELECT a.id, a.project_id, a.relative_path, a.project_relative_path, a.name, a.kind,
        a.extension, a.sort_order, a.size_bytes, a.mtime_ms, a.current_version_id,
-       a.missing_at, v.validation_error FROM assets a
+       a.missing_at, v.validation_error, v.content_hash FROM assets a
        LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.id = $1`,
     [id],
   );
@@ -174,6 +175,7 @@ function libraryError(reply: FastifyReply, error: unknown) {
 export function registerCatalog(server: FastifyInstance, options: CatalogOptions, auth: Auth) {
   const { pool, root, indexer, clientMountPrefix: mount } = options;
   const preview = createPreviewLimiter();
+  const verifyDownload = createPreviewLimiter();
   let rescanPending = false;
 
   server.get('/catalog/status', { preHandler: auth.authenticate }, async () => {
@@ -400,6 +402,24 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
         await handle.close();
         return reply.code(409).send({ error: 'File changed since indexing; rescan before downloading' });
       }
+      if (request.query.versionId) {
+        try {
+          const unchanged = await verifyDownload(async () => {
+            const hash = createHash('sha256');
+            for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) hash.update(chunk);
+            const after = await handle.stat();
+            return hash.digest('hex') === asset.content_hash &&
+              after.size === stats.size && Math.abs(after.mtimeMs - stats.mtimeMs) <= 1;
+          });
+          if (!unchanged) {
+            await handle.close();
+            return reply.code(409).send({ error: 'File content changed since indexing; rescan before downloading' });
+          }
+        } catch (error) {
+          await handle.close();
+          throw error;
+        }
+      }
       const filename = Array.from(asset.name, (character) =>
         character === '"' || character === '\\' || character.codePointAt(0)! < 32
           ? '_' : character).join('');
@@ -407,7 +427,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       reply.header('Content-Type', 'application/octet-stream');
       reply.header('Content-Disposition', `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
       reply.header('Cache-Control', 'private, no-store');
-      return reply.send(handle.createReadStream());
+      return reply.send(handle.createReadStream({ start: 0 }));
     } catch (error) {
       return libraryError(reply, error);
     }

@@ -134,7 +134,10 @@ material and color, and optional notes. A request retains the exact selected
 asset and version IDs, a source-file metadata snapshot, and its preferences
 even when a scan renames a project, finds a new version, or marks an old file
 missing. An unavailable version is labeled as such; opening its historical
-download returns 410, never a different version. Offline or partial NAS scans
+download returns 410, never a different indexed version. Version-specific
+downloads check the indexed SHA-256 before streaming and return 409 if source
+bytes changed without a rescan, even when file size and modification time
+appear unchanged. Offline or partial NAS scans
 do not erase requests or history. Print Pantry tracks decisions only: opening
 or downloading a file remains a separate, manual slicer workflow.
 
@@ -179,12 +182,18 @@ browser suite in `tests/browser/` fails closed unless
 `PANTRY_E2E_SYNTHETIC=1`, `PANTRY_E2E_BASE_URL` points to
 `http://127.0.0.1:<web-port>`, `PANTRY_E2E_BROWSER_PATH` names an already
 installed Chromium-compatible browser, and `PANTRY_E2E_PASSWORD` is the
-synthetic accounts' password. The accounts are named `syntheticoperator` and
-`syntheticrequester`. Run `npm run test:browser` on the host with Node 24.13.1
+synthetic accounts' password. Set `PANTRY_E2E_SYNTHETIC_LIBRARY_ROOT` to the
+host directory of the generated STL fixture, mounted read-only in the
+container. It must live under a Copilot session-state directory or a
+`print-pantry-e2e-*` temporary directory; the suite verifies the exact
+generated STL content before temporarily moving it and restores it afterward.
+The accounts are named `syntheticoperator` and `syntheticrequester`.
+Run `npm run test:browser` on the host with Node 24.13.1
 while the isolated app container is ready. The suite exercises desktop and
 mobile browsing/search, clipboard and exact-file download, selection and
 submission, cancellation/decline, approval/reorder/selected-next, printing
-and completion, requester history, and viewport overflow. It creates real
+and completion, requester history, unavailable-version/410 behavior after a
+synthetic rescan and subsequent recovery, and viewport overflow. It creates real
 requests in the **disposable** database; never aim it at an existing
 household database or actual library.
 

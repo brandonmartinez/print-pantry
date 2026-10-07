@@ -1,12 +1,15 @@
-import { readFile } from 'node:fs/promises';
-import { expect, test, type Browser, type Page } from '@playwright/test';
+import { lstat, readFile, realpath, rename } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
 
 const baseURL = process.env.PANTRY_E2E_BASE_URL;
 const browserPath = process.env.PANTRY_E2E_BROWSER_PATH;
 const password = process.env.PANTRY_E2E_PASSWORD;
-if (!baseURL || !browserPath || !password || process.env.PANTRY_E2E_SYNTHETIC !== '1' ||
+const libraryRoot = process.env.PANTRY_E2E_SYNTHETIC_LIBRARY_ROOT;
+if (!baseURL || !browserPath || !password || !libraryRoot || process.env.PANTRY_E2E_SYNTHETIC !== '1' ||
   new URL(baseURL).hostname !== '127.0.0.1') {
-  throw new Error('Browser tests require a localhost synthetic app, browser path, and test-only account credentials');
+  throw new Error('Browser tests require a localhost synthetic app, generated library, browser path, and test-only accounts');
 }
 
 test.use({ baseURL, browserName: 'chromium', launchOptions: { executablePath: browserPath } });
@@ -54,6 +57,20 @@ async function createRequesterContext(browser: Browser, mobile: boolean) {
     permissions: ['clipboard-read', 'clipboard-write'],
     acceptDownloads: true,
   });
+}
+
+async function rescan(context: BrowserContext) {
+  const before = await (await context.request.get('/api/catalog/status')).json() as {
+    scan: { lastScan?: { id: string } };
+  };
+  const trigger = await context.request.post('/api/catalog/rescan');
+  expect(trigger.status()).toBe(202);
+  await expect.poll(async () => {
+    const result = await (await context.request.get('/api/catalog/status')).json() as {
+      scan: { state: string; lastScan?: { id: string } };
+    };
+    return result.scan.lastScan?.id !== before.scan.lastScan?.id && result.scan.state === 'succeeded';
+  }, { timeout: 30_000 }).toBe(true);
 }
 
 for (const mobile of [false, true]) {
@@ -113,7 +130,14 @@ for (const mobile of [false, true]) {
       await operatorPage.getByRole('button', { name: `Move ${second} earlier` }).click();
       await operatorPage.getByRole('button', { name: 'Save queue order' }).click();
       await expect(operatorPage.getByText('Queue order saved.')).toBeVisible();
-      await expect(operatorPage.locator('.queue-list li').first()).toContainText('part 02.stl');
+      const order = await operator.request.get(new URL('/api/requests/queue', baseURL).href);
+      expect(order.status()).toBe(200);
+      const queue = await order.json() as { items: Array<{ id: string }> };
+      const secondPosition = queue.items.findIndex((item) => item.id === second);
+      const firstPosition = queue.items.findIndex((item) => item.id === first);
+      expect(firstPosition).toBeGreaterThanOrEqual(0);
+      expect(secondPosition).toBeGreaterThanOrEqual(0);
+      expect(secondPosition).toBeLessThan(firstPosition);
       await secondCard.getByRole('button', { name: 'Choose next' }).click();
       await expect(secondCard.getByRole('button', { name: 'Mark printing' })).toBeVisible();
       await secondCard.getByRole('button', { name: 'Mark printing' }).click();
@@ -144,3 +168,62 @@ for (const mobile of [false, true]) {
     }
   });
 }
+
+test('missing exact version remains visible without substituting a file', async ({ browser }, testInfo) => {
+  const resolvedRoot = await realpath(libraryRoot!);
+  if (!resolvedRoot.includes('/.copilot/session-state/') &&
+    !resolvedRoot.startsWith(`${join(tmpdir(), 'print-pantry-e2e-')}`)) {
+    throw new Error('Refusing to modify a library outside a dedicated synthetic fixture directory');
+  }
+  const original = join(resolvedRoot, 'Household', 'Organizers', 'Desk Tray', 'files', 'part 02.stl');
+  const expected = [
+    'solid tray', 'facet normal 0 0 1', 'outer loop',
+    'vertex 0 0 0', 'vertex 10 0 0', 'vertex 0 10 0',
+    'endloop', 'endfacet', 'endsolid tray', '',
+  ].join('\n');
+  const info = await lstat(original);
+  if (!info.isFile() || info.isSymbolicLink() || await readFile(original, 'utf8') !== expected) {
+    throw new Error('Refusing to move a file that is not the generated test STL');
+  }
+  const staged = testInfo.outputPath('held-synthetic-part.stl');
+  const requester = await createRequesterContext(browser, false);
+  const operator = await browser.newContext({ baseURL });
+  let moved = false;
+  try {
+    const page = await requester.newPage();
+    await signIn(page, 'syntheticrequester');
+    await openProject(page);
+    const id = await submit(page, 'part 02.stl', `source unavailable ${Date.now()}`);
+    const details = await (await requester.request.get(`/api/requests/${id}`)).json() as {
+      request: { selected: Array<{ assetId: string; versionId: string }> };
+    };
+    const selected = details.request.selected[0];
+    const operatorPage = await operator.newPage();
+    await signIn(operatorPage, 'syntheticoperator');
+
+    await rename(original, staged);
+    moved = true;
+    await rescan(operator);
+    await page.getByRole('button', { name: 'Requests' }).click();
+    const card = page.locator('.request-card').filter({ hasText: `Request ${id}` });
+    await expect(card.getByText('The selected source file is no longer available.')).toBeVisible();
+    await expect(card.getByText('Exact version unavailable')).toBeVisible();
+    const version = `/api/catalog/assets/${selected.assetId}/download?versionId=${selected.versionId}`;
+    expect((await requester.request.get(version)).status()).toBe(410);
+    await page.screenshot({ path: testInfo.outputPath('source-unavailable.png') });
+
+    await rename(staged, original);
+    moved = false;
+    await rescan(operator);
+    await page.getByRole('button', { name: 'Refresh' }).click();
+    await expect(card.getByRole('link', { name: 'Download version' })).toBeVisible();
+    expect((await requester.request.get(version)).status()).toBe(200);
+  } finally {
+    if (moved) {
+      await rename(staged, original);
+      await rescan(operator);
+    }
+    await requester.close();
+    await operator.close();
+  }
+});

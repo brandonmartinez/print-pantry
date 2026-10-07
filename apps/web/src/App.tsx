@@ -21,6 +21,8 @@ type RequestHistoryEntry = {
   action?: string;
   status?: RequestStatus;
   toStatus?: RequestStatus | null;
+  fromPosition?: number | null;
+  toPosition?: number | null;
   note?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
@@ -32,6 +34,7 @@ type PrintRequest = {
   id: string;
   projectId: string;
   projectName?: string | null;
+  requester?: { username?: string | null } | null;
   status: RequestStatus;
   selected: RequestSelection[];
   quantity: number;
@@ -164,6 +167,27 @@ function requestStatusLabel(status: RequestStatus): string {
     canceled: 'Canceled',
   };
   return labels[status] || status;
+}
+
+function requestHistoryLabel(entry: RequestHistoryEntry): string {
+  if (entry.action === 'reorder') {
+    return entry.fromPosition != null && entry.toPosition != null
+      ? `Moved in queue from ${entry.fromPosition} to ${entry.toPosition}`
+      : 'Queue order changed';
+  }
+  if (entry.action === 'select_next') return 'Next print selection changed';
+  return requestStatusLabel(entry.toStatus || entry.status || entry.action || 'Updated');
+}
+
+function unavailableSourceMessage(reason?: string | null): string {
+  const messages: Record<string, string> = {
+    project_missing: 'The project source is no longer available.',
+    asset_missing: 'The selected source file is no longer available.',
+    version_missing: 'The selected file version is no longer available.',
+    version_not_current: 'The selected file version is no longer current or available.',
+    library_offline: 'Library storage is offline; the source cannot be checked right now.',
+  };
+  return messages[reason ?? ''] ?? 'One or more requested source files are no longer available.';
 }
 
 function isPoint3D(value: unknown): value is Point3D {
@@ -663,9 +687,9 @@ function RequestForm({ project }: { project: ProjectResponse['project'] }) {
           <div className="request-fields">
             <label>Quantity <input aria-describedby="quantity-hint" inputMode="numeric" max={100} min={1} onChange={(event) => setQuantity(event.target.value)} required step={1} type="number" value={quantity} /></label>
             <p className="field-hint" id="quantity-hint">Whole number from 1 to 100.</p>
-            <label>Material <input maxLength={80} onChange={(event) => setMaterial(event.target.value)} placeholder="Optional, e.g. PLA" value={material} /></label>
-            <label>Color <input maxLength={80} onChange={(event) => setColor(event.target.value)} placeholder="Optional, e.g. sage green" value={color} /></label>
-            <label className="request-notes">Notes <textarea maxLength={1000} onChange={(event) => setNotes(event.target.value)} placeholder="Optional fit, finish, or timing details" rows={3} value={notes} /></label>
+            <label>Material <input maxLength={100} onChange={(event) => setMaterial(event.target.value)} placeholder="Optional, e.g. PLA" value={material} /></label>
+            <label>Color <input maxLength={100} onChange={(event) => setColor(event.target.value)} placeholder="Optional, e.g. sage green" value={color} /></label>
+            <label className="request-notes">Notes <textarea maxLength={2000} onChange={(event) => setNotes(event.target.value)} placeholder="Optional fit, finish, or timing details" rows={3} value={notes} /></label>
           </div>
           {(error || message) && <p className={`notice ${error ? 'notice-error' : 'notice-success'}`} role={error ? 'alert' : 'status'}>{error || message}</p>}
           <button className="button button-primary" disabled={busy} type="submit">{busy ? 'Submitting…' : 'Submit print request'}</button>
@@ -685,7 +709,7 @@ function RequestCard({
   request: PrintRequest;
   isOperator: boolean;
   selectedNextId?: string | null;
-  onAction: (request: PrintRequest, action: 'approve' | 'decline' | 'cancel' | 'start' | 'complete', note?: string) => Promise<void>;
+  onAction: (request: PrintRequest, action: 'approve' | 'decline' | 'cancel' | 'start' | 'complete', note?: string) => Promise<boolean>;
   onSelectNext: (requestId: string) => Promise<void>;
 }) {
   const [note, setNote] = useState('');
@@ -718,10 +742,11 @@ function RequestCard({
   async function act(action: 'approve' | 'decline' | 'cancel' | 'start' | 'complete') {
     setBusy(true);
     try {
-      await onAction(request, action, note.trim() || undefined);
-      setNote('');
-      setHistoryRequest(null);
-      if (historyOpen) await loadHistory();
+      if (await onAction(request, action, note.trim() || undefined)) {
+        setNote('');
+        setHistoryRequest(null);
+        if (historyOpen) await loadHistory();
+      }
     } finally {
       setBusy(false);
     }
@@ -754,11 +779,11 @@ function RequestCard({
         })}
       </ul>}
       {(request.sourceUnavailable || request.selected.some((selection) => selection.available === false)) && (
-        <p className="source-warning" role="status">{request.selected.find((selection) => selection.unavailableReason)?.unavailableReason || 'One or more requested source files are no longer available.'}</p>
+        <p className="source-warning" role="status">{unavailableSourceMessage(request.selected.find((selection) => selection.unavailableReason)?.unavailableReason)}</p>
       )}
       {isOperator && (canReview || status === 'queued' || status === 'printing') && (
         <label className="operator-note">Operator note
-          <input disabled={busy} maxLength={1000} onChange={(event) => setNote(event.target.value)} placeholder="Optional note for this request" value={note} />
+          <input disabled={busy} maxLength={2000} onChange={(event) => setNote(event.target.value)} placeholder="Optional note for this request" value={note} />
         </label>
       )}
       <div className="request-actions">
@@ -781,7 +806,7 @@ function RequestCard({
           {historyError && <p role="alert">{historyError} <button className="text-button" onClick={() => void loadHistory()} type="button">Retry history</button></p>}
           {!historyLoading && !historyError && history && history.length > 0 && <ol>
             {history.map((entry, index) => <li key={`${entry.createdAt || entry.updatedAt || index}-${entry.action || entry.status || ''}`}>
-              <strong>{requestStatusLabel(entry.toStatus || entry.status || entry.action || 'Updated')}</strong>
+              <strong>{requestHistoryLabel(entry)}</strong>
               {(entry.actorName || entry.actorUsername || entry.actor?.username) && <span> by {entry.actorName || entry.actorUsername || entry.actor?.username}</span>}
               {(formatDate(entry.createdAt || entry.updatedAt)) && <time> · {formatDate(entry.createdAt || entry.updatedAt)}</time>}
               {entry.note && <p>{entry.note}</p>}
@@ -838,6 +863,14 @@ function RequestsPage({ user }: { user: User }) {
   async function performAction(request: PrintRequest, action: 'approve' | 'decline' | 'cancel' | 'start' | 'complete', note?: string) {
     setError('');
     setMessage('');
+    if (isOperator && queueDirty) {
+      setError('Save queue order before updating requests.');
+      return false;
+    }
+    if (queueBusy) {
+      setError('Wait for the queue update before changing a request.');
+      return false;
+    }
     try {
       await apiRequest<RequestResponse>(`/api/requests/${encodeURIComponent(request.id)}`, {
         method: 'PATCH',
@@ -847,19 +880,30 @@ function RequestsPage({ user }: { user: User }) {
           ...(revision !== undefined && action !== 'cancel' ? { expectedRevision: revision } : {}),
         }),
       });
-      setMessage(`Request ${request.id} ${action === 'approve' ? 'approved and queued' : `${action}d`}.`);
+      const outcome = {
+        approve: 'approved and queued', decline: 'declined', cancel: 'canceled',
+        start: 'started printing', complete: 'completed',
+      }[action];
+      setMessage(`Request ${request.id} ${outcome}.`);
       setRefresh((value) => value + 1);
+      return true;
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 409) {
         await refreshAfterConflict();
-        return;
+        return false;
       }
       setError(`Could not update request: ${errorMessage(reason)}`);
+      return false;
     }
   }
 
   async function chooseNext(requestId: string) {
     if (revision === undefined) return;
+    if (queueDirty) {
+      setError('Save queue order before choosing the next print.');
+      return;
+    }
+    if (queueBusy) return;
     setQueueBusy(true);
     setError('');
     setMessage('');
@@ -929,7 +973,7 @@ function RequestsPage({ user }: { user: User }) {
         {queue.length === 0 ? <p className="empty-note">No approved prints are waiting in the queue.</p> : <ol className="queue-list">
           {queue.map((request, index) => <li key={request.id}>
             <span className="queue-position">{index + 1}</span>
-            <span className="queue-title"><strong>{request.projectName || request.id}</strong><small>{request.quantity} · {request.selected.map((selection) => selection.name || selection.relativePath || selection.assetId).join(', ')}</small></span>
+            <span className="queue-title"><strong>{request.projectName || request.id}</strong><small>Request {request.id.slice(0, 8)} · {request.requester?.username || 'Household member'} · {request.quantity} · {request.selected.map((selection) => selection.name || selection.relativePath || selection.assetId).join(', ')}</small></span>
             {selectedNextId === request.id && <span className="next-badge">Next</span>}
             <span className="queue-controls"><button aria-label={`Move ${request.id} earlier`} className="button button-small button-quiet" disabled={queueBusy || index === 0} onClick={() => moveQueueItem(index, -1)} type="button">↑</button><button aria-label={`Move ${request.id} later`} className="button button-small button-quiet" disabled={queueBusy || index === queue.length - 1} onClick={() => moveQueueItem(index, 1)} type="button">↓</button></span>
           </li>)}

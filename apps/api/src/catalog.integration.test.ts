@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDatabase, createPool, runMigrations } from '@print-pantry/db';
@@ -181,6 +181,28 @@ describe('authenticated catalog and local files', () => {
     });
     expect(projectPreview.statusCode).toBe(200);
     expect(projectPreview.headers['content-type']).toContain('image/png');
+  });
+
+  it('does not download substituted bytes when size and mtime match the selected version', async () => {
+    const file = path.join(root, rootName, 'Gadgets', 'Desk Lamp', 'files', 'part 02.stl');
+    const original = await readFile(file, 'utf8');
+    const before = await stat(file);
+    const replacement = original.replace('vertex 1 0 0', 'vertex 9 0 0');
+    expect(replacement).not.toBe(original);
+    expect(replacement.length).toBe(original.length);
+    try {
+      await writeFile(file, replacement);
+      await utimes(file, before.atimeMs / 1000, before.mtimeMs / 1000);
+      const download = await server.inject({
+        method: 'GET', url: `/catalog/assets/${assetId}/download?versionId=${versionId}`,
+        headers: { cookie: requesterCookie },
+      });
+      expect(download.statusCode).toBe(409);
+      expect(download.json().error).toContain('content changed');
+    } finally {
+      await writeFile(file, original);
+      await utimes(file, before.atimeMs / 1000, before.mtimeMs / 1000);
+    }
   });
 
   it('enforces operator mutations and preserves metadata and version identity', async () => {
