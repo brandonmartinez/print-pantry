@@ -28,4 +28,27 @@ describe('service health', () => {
     expect(response.json()).toEqual({ status: 'unavailable' });
     await server.close();
   });
+
+  it('rejects cross-origin and host-spoofed mutations before API handlers', async () => {
+    const server = buildServer({ query: vi.fn() }, {
+      pool: {} as never, root: '/mnt/library', indexer: {} as never,
+      secureCookie: true, publicOrigin: 'https://pantry.example.test',
+    });
+    const readiness = await server.inject('/ready');
+    expect(readiness.statusCode).toBe(200);
+    for (const headers of [
+      { host: 'pantry.example.test', origin: 'https://other.example.test' },
+      { host: 'other.example.test', origin: 'https://pantry.example.test' },
+      { host: 'pantry.example.test' },
+    ]) {
+      const response = await server.inject({ method: 'POST', url: '/auth/logout', headers });
+      expect(response.statusCode).toBe(403);
+    }
+    const sameOrigin = await server.inject({
+      method: 'POST', url: '/auth/logout',
+      headers: { host: 'pantry.example.test', origin: 'https://pantry.example.test' },
+    });
+    expect(sameOrigin.statusCode).toBe(401);
+    await server.close();
+  });
 });

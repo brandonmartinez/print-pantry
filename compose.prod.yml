@@ -1,0 +1,100 @@
+services:
+  db:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_USER: pantry
+      POSTGRES_DB: print_pantry
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - pantry_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pantry -d print_pantry"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+      target: api
+      secrets:
+        - npmrc
+        - npm_ca
+        - npm_proxy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ""
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      LIBRARY_ROOT: /mnt/library
+      LIBRARY_IGNORED_DIRS: ${LIBRARY_IGNORED_DIRS:-}
+      LIBRARY_ALLOW_EMPTY: ${LIBRARY_ALLOW_EMPTY:-false}
+      CLIENT_MOUNT_PREFIX: ${CLIENT_MOUNT_PREFIX:-}
+      SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-30}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the private HTTPS origin, including scheme and optional port}
+      ALLOW_INSECURE_HTTP: ${ALLOW_INSECURE_HTTP:-false}
+      WEB_BIND_ADDRESS: ${WEB_BIND_ADDRESS:-127.0.0.1}
+    secrets:
+      - db_password
+    volumes:
+      - ${LIBRARY_HOST_PATH:?Set an absolute, existing library directory}:/mnt/library:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+      target: web
+      secrets:
+        - npmrc
+        - npm_ca
+        - npm_proxy
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+secrets:
+  npmrc:
+    file: ${HOST_NPM_CONFIG_FILE:?Set the absolute path to your existing npm config}
+  npm_ca:
+    file: ${HOST_NPM_CA_FILE:-./deploy/empty-secret.example}
+  npm_proxy:
+    file: ${HOST_NPM_PROXY_ENV_FILE:-./deploy/empty-secret.example}
+  db_password:
+    file: ${DB_PASSWORD_FILE:-./deploy/empty-secret.example}
+
+volumes:
+  pantry_pg_data:
