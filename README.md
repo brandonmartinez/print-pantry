@@ -21,9 +21,9 @@ contains `apps/web`, `apps/api`, `packages/contracts`, and `packages/db`.
 
 | Command | Purpose |
 | --- | --- |
-| `npm run dev` | Run the web and API watchers together |
+| `npm run dev` | Build shared packages first, then watch shared outputs and the API/web |
 | `npm run build` | Build shared packages, API, then web |
-| `npm run typecheck` | Type-check all workspaces |
+| `npm run typecheck` | Build shared declarations first, then type-check all workspaces |
 | `npm run lint` | Lint workspace code |
 | `npm test` | Run focused API, React, and database tests (requires isolated test DB) |
 | `npm run db:generate` | Generate a reviewed SQL migration from schema changes |
@@ -37,6 +37,13 @@ development, provide your own isolated PostgreSQL and set `DATABASE_URL` and
 `TEST_DATABASE_URL` (the latter must point to `print_pantry_test`), then run
 `npm run build && npm run db:migrate && npm test && npm run dev`. Never target
 an external or production database with the test URL.
+
+The shared packages export compiled `dist` files. Root `typecheck` deliberately
+builds them first so it works immediately after `npm ci`; root `dev` does the
+same before starting four coordinated watchers. Changes in contracts or DB
+source rebuild their outputs, and the API watcher restarts when shared outputs
+change. Stop all watchers together with Ctrl+C; a failed initial shared build
+prevents startup rather than serving stale output.
 
 `GET /health` reports process liveness; `GET /ready` checks PostgreSQL
 connectivity and returns HTTP 503 when it is unavailable. The frontend calls
