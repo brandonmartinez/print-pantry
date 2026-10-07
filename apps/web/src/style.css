@@ -252,7 +252,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border-radius: 8px;
   background: #f8f8f4;
 }
-.search-field:focus-within { border-color: #afbfaa; }
+.search-field:focus-within {
+  border-color: var(--green-dark);
+  outline: 3px solid var(--green-dark);
+  outline-offset: 2px;
+}
 .search-icon { color: #758076; font-size: 1.55rem; line-height: 1; transform: rotate(-18deg); }
 .search-field input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: .85rem; }
 .search-field input::placeholder { color: #929a90; }
