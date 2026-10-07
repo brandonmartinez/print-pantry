@@ -40,30 +40,38 @@ operators.
 
 Set production configuration in an ignored environment file, including the
 exact HTTPS `PUBLIC_ORIGIN`, `COOKIE_SECURE=true`, the read-only
-`LIBRARY_ROOT`, and any optional client mount prefix. For the default internal
-PostgreSQL deployment, run the build with the existing host npm configuration
-and a nonempty password file:
+`LIBRARY_ROOT`, and any optional client mount prefix. Export the needed
+variables from that file without printing them. Docker Compose v5 cannot grant
+BuildKit filesystem access to the host npm configuration through `docker
+compose build`; build the two images with Bake instead:
 
 ```sh
-HOST_NPM_CONFIG_FILE=/absolute/path/to/your/npmrc \
-DB_PASSWORD_FILE=/absolute/path/to/secret \
-docker compose -f compose.prod.yml build
-docker compose -f compose.prod.yml up -d db
+docker buildx bake -f compose.prod.yml \
+  --allow=fs.read=/absolute/path/to/npmrc \
+  --allow=fs.read=/absolute/path/to/secret-directory \
+  --load \
+  --set api.tags=<composeproject>-api:latest \
+  --set web.tags=<composeproject>-web:latest \
+  api web
 ```
 
-Compose passes the npm configuration as the required `npmrc` BuildKit secret
-and can also secret-mount `npm_ca` and `npm_proxy`. The build must fail if the
-configured registry cannot be reached; do not switch to a public registry.
+The first allowed path is the `HOST_NPM_CONFIG_FILE` value. The secret
+directory covers required runtime password and optional npm CA/proxy secret
+files. Compose passes the npm configuration as the required `npmrc` BuildKit
+secret and can also secret-mount `npm_ca` and `npm_proxy`. The build must fail
+if the configured registry cannot be reached; do not switch to a public
+registry.
 
 For a deliberately external database, set `DATABASE_URL` in the ignored
-environment file, do not provide an internal database password file, and use:
+environment file, do not provide an internal database password file, and use
+the external override consistently:
 
 ```sh
-HOST_NPM_CONFIG_FILE=/absolute/path/to/your/npmrc \
-docker compose -f compose.prod.yml -f compose.external.yml build
-docker compose -f compose.prod.yml -f compose.external.yml run --rm --no-deps api \
+docker compose -p <composeproject> -f compose.prod.yml -f compose.external.yml \
+  run --rm --no-deps api \
   node packages/db/dist/migrate.js
-docker compose -f compose.prod.yml -f compose.external.yml up -d
+docker compose -p <composeproject> -f compose.prod.yml -f compose.external.yml \
+  up -d --wait
 ```
 
 This override starts only `web` and `api`; it never silently starts a local
@@ -73,9 +81,10 @@ For the default internal database, wait for `db` to be healthy, apply
 migrations, then start the application services:
 
 ```sh
-docker compose -f compose.prod.yml run --rm --no-deps api \
+docker compose -p <composeproject> -f compose.prod.yml up -d --wait db
+docker compose -p <composeproject> -f compose.prod.yml run --rm --no-deps api \
   node packages/db/dist/migrate.js
-docker compose -f compose.prod.yml up -d api web
+docker compose -p <composeproject> -f compose.prod.yml up -d --wait api web
 ```
 
 The frontend origin is intended for a private HTTPS reverse proxy, not direct
@@ -100,7 +109,7 @@ Migrations are not run by HTTP requests. After the API is running, create the
 first household account interactively:
 
 ```sh
-docker compose -f compose.prod.yml exec -it api \
+docker compose -p <composeproject> -f compose.prod.yml exec -it api \
   node apps/api/dist/provision.js operator operator
 ```
 
@@ -151,18 +160,34 @@ The database and the real library are separate recovery domains. Back up both:
 
 Verify every backup non-destructively before relying on it:
 
-1. Provision a separate disposable PostgreSQL instance and an isolated,
-   read-only library fixture or copy. Never restore over the live production
-   database and never let verification scan the real NAS.
-2. Restore the database backup there, apply the same versioned migrations, and
-   start the API against only those isolated targets.
-3. Compare project, asset, and version counts; sample metadata; verify
-   representative request, queue, selected-file, and action-history records.
-4. Exercise authenticated catalog access and confirm an unavailable historical
-   file still returns its expected unavailable response rather than another
-   file.
-5. Record the backup identifier, software revision, verification date, and
-   result. Treat a failed verification as an unusable backup.
+The `scripts/verify-restore.sh` worker requires Bash and PostgreSQL 17 client
+tools. Supply connection settings through the environment, keeping credentials
+in approved external authentication mechanisms rather than command history:
+
+```sh
+SOURCE_PGHOST=<source-host> \
+SOURCE_PGPORT=<source-port> \
+SOURCE_PGUSER=<source-user> \
+SOURCE_PGDATABASE=<source-database> \
+RESTORE_PGHOST=<isolated-host> \
+RESTORE_PGPORT=<isolated-port> \
+RESTORE_PGUSER=<isolated-user> \
+RESTORE_PGDATABASE=<isolated-admin-database> \
+RESTORE_DATABASE_NAME=print_pantry_restore_<unique> \
+BACKUP_FILE=/absolute/path/to/backup \
+scripts/verify-restore.sh
+```
+
+The script reads the source dump only, requires a fresh isolated restore
+target, and checks the restored rowsets. It refuses an unsafe restore target;
+do not bypass that refusal. Use a unique
+`print_pantry_restore_<unique>` database name and never point `RESTORE_*` at
+the production service. Also verify an isolated, read-only library fixture or
+copy: compare project, asset, and version counts; sample metadata; verify
+representative request, queue, selected-file, and action-history records; and
+exercise authenticated catalog access. Record the backup identifier, software
+revision, verification date, and result. Treat a failed verification as an
+unusable backup.
 
 Refuse a restore target unless it is positively identified as the disposable
 verification instance. Do not automate broad deletes, volume removal, or a
