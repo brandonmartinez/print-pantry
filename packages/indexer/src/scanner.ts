@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, createReadStream, type Stats } from 'node:fs';
-import { lstat, open, readFile, readdir } from 'node:fs/promises';
+import { lstat, open, readdir } from 'node:fs/promises';
 import { basename, extname, join, relative, resolve, sep } from 'node:path';
 import { and, eq, isNotNull, isNull, notInArray } from 'drizzle-orm';
 import { createDatabase, schema } from '@print-pantry/db';
@@ -55,6 +55,7 @@ const kinds: Record<string, Kind> = {
   '.gcode': 'print', '.bgcode': 'print', '.gx': 'print',
 };
 const formatFolders = new Set(['files', 'stl', '3mf', 'obj', 'source', 'sources', 'models', 'variants']);
+const MAX_SIDECAR_BYTES = 128 * 1024;
 
 function comparePaths(a: { path: string }, b: { path: string }): number {
   return collator.compare(a.path, b.path) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
@@ -91,8 +92,25 @@ async function sidecarMetadata(directory: Directory, errors: ScanError[], librar
     const name = basename(file.path).toLowerCase();
     if (!['project.json', 'metadata.json', 'readme.md', 'source.url'].includes(name)) continue;
     try {
-      if (file.stat.size > 128 * 1024) throw new Error('Sidecar exceeds 128 KiB');
-      const contents = await readFile(file.fullPath, 'utf8');
+      if (file.stat.size > MAX_SIDECAR_BYTES) throw new Error('Sidecar exceeds 128 KiB');
+      const handle = await open(file.fullPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let contents: string;
+      try {
+        if (!statMatches(file.stat, await handle.stat())) throw new Error('Sidecar changed during scan');
+        const bytes = Buffer.alloc(MAX_SIDECAR_BYTES + 1);
+        let bytesRead = 0;
+        while (bytesRead < bytes.length) {
+          const result = await handle.read(bytes, bytesRead, bytes.length - bytesRead, bytesRead);
+          if (!result.bytesRead) break;
+          bytesRead += result.bytesRead;
+        }
+        if (bytesRead > MAX_SIDECAR_BYTES) throw new Error('Sidecar exceeds 128 KiB');
+        if (bytesRead !== file.stat.size || !statMatches(file.stat, await handle.stat())
+          || !statMatches(file.stat, await lstat(file.fullPath))) throw new Error('Sidecar changed during scan');
+        contents = bytes.subarray(0, bytesRead).toString('utf8');
+      } finally {
+        await handle.close();
+      }
       if (name.endsWith('.json')) {
         const data: unknown = JSON.parse(contents);
         if (typeof data !== 'object' || data === null || Array.isArray(data)) throw new Error('Sidecar must contain an object');
@@ -239,7 +257,8 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
           try {
             const old = oldAssetsByPath.get(file.path);
             if (old?.contentHash && old.sizeBytes === file.stat.size
-              && old.mtimeMs === Math.trunc(file.stat.mtimeMs)) {
+              && old.mtimeMs === Math.trunc(file.stat.mtimeMs)
+              && old.inode === file.stat.ino && old.device === file.stat.dev) {
               file.hash = old.contentHash;
               const validationError = previousVersionById.get(old.currentVersionId ?? '')?.validationError;
               if (validationError) {
@@ -273,7 +292,7 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
           errors.push({ relativePath: directory.path || null, code: 'DIRECTORY_CHANGED', message: safeError(error, libraryRoot) });
         }
       }
-      if (!allowEmptyLibrary && tree.children.length === 0 && allFiles.length === 0
+      if (!allowEmptyLibrary && allFiles.length === 0
         && previousProjects.some((project) => !project.missingAt)) {
         errors.push({ relativePath: null, code: 'EMPTY_LIBRARY', message: 'Empty library with existing catalog; verify mount before marking files missing' });
       }
@@ -300,8 +319,109 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
         newSignatureCounts.set(key, (newSignatureCounts.get(key) ?? 0) + 1);
       }
 
+      const projectByPath = new Map(previousProjects.map((project) => [project.relativePath, project]));
+      const ordered = found.sort((a, b) => comparePaths(a.directory, b.directory))
+        .map((project) => ({ project, files: project.files.filter((file) => file.hash).sort(comparePaths) }))
+        .filter((entry) => entry.files.length);
+      const projectSignature = (project: FoundProject, files: FileInfo[]) => signature(files.map((file) => ({
+        path: relative(join(libraryRoot, project.directory.path), file.fullPath).split(sep).join('/'),
+        hash: file.hash, size: file.stat.size,
+      })));
+      const uniqueTargets = new Map<string, string>();
+      for (const { project, files } of ordered) {
+        const key = projectSignature(project, files);
+        if (files.length === project.files.length && oldSignatureCounts.get(key) === 1
+          && newSignatureCounts.get(key) === 1) {
+          uniqueTargets.set(oldSignatures.get(key)![0].id, project.directory.path);
+        }
+      }
+      const plans = ordered.map(({ project, files }) => {
+        const path = project.directory.path;
+        const occupant = projectByPath.get(path);
+        const key = projectSignature(project, files);
+        const candidate = files.length === project.files.length && uniqueTargets.get(oldSignatures.get(key)?.[0]?.id ?? '') === path
+          ? oldSignatures.get(key)?.[0] : undefined;
+        let existing = occupant;
+        if (candidate && candidate.id !== occupant?.id) {
+          if (!occupant || (uniqueTargets.has(occupant.id) && uniqueTargets.get(occupant.id) !== path)) {
+            existing = candidate;
+          } else {
+            errors.push({ relativePath: path, code: 'AMBIGUOUS_PROJECT',
+              message: 'The destination path belongs to another project without an unambiguous relocation' });
+          }
+        } else if (!occupant && !candidate && oldSignatures.has(key)) {
+          errors.push({ relativePath: path, code: 'AMBIGUOUS_PROJECT',
+            message: 'Multiple projects share this file manifest; resolve duplicates before matching renames' });
+        }
+        return { project, files, existing };
+      });
+      const assetMatches = new Map<string, typeof previousAssets[number] | undefined>();
+      const claimed = new Set<string>();
+      const assetKey = (file: { hash: string; size: number; extension: string }) =>
+        JSON.stringify([file.hash, file.size, file.extension]);
+      for (const { project, files, existing } of plans) {
+        const available = previousAssets.filter((asset) => asset.projectId === existing?.id);
+        const oldByKey = new Map<string, typeof previousAssets>();
+        const newByKey = new Map<string, number>();
+        for (const asset of available) {
+          if (!asset.contentHash) continue;
+          const key = assetKey({ hash: asset.contentHash, size: asset.sizeBytes, extension: asset.extension });
+          oldByKey.set(key, [...(oldByKey.get(key) ?? []), asset]);
+        }
+        for (const file of files) {
+          const key = assetKey({ hash: file.hash, size: file.stat.size, extension: file.extension });
+          newByKey.set(key, (newByKey.get(key) ?? 0) + 1);
+        }
+        const uniqueAssetTargets = new Map<string, string>();
+        for (const file of files) {
+          const key = assetKey({ hash: file.hash, size: file.stat.size, extension: file.extension });
+          if (oldByKey.get(key)?.length === 1 && newByKey.get(key) === 1) {
+            uniqueAssetTargets.set(oldByKey.get(key)![0].id, file.path);
+          }
+        }
+        for (const file of files) {
+          const path = relative(join(libraryRoot, project.directory.path), file.fullPath).split(sep).join('/');
+          const occupant = available.find((asset) => asset.projectRelativePath === path);
+          const key = assetKey({ hash: file.hash, size: file.stat.size, extension: file.extension });
+          const candidate = oldByKey.get(key)?.length === 1 && newByKey.get(key) === 1
+            ? oldByKey.get(key)![0] : undefined;
+          let old = occupant;
+          if (candidate && candidate.id !== occupant?.id) {
+            if (!occupant || (uniqueAssetTargets.has(occupant.id) && uniqueAssetTargets.get(occupant.id) !== file.path)) {
+              old = candidate;
+            } else {
+              errors.push({ relativePath: file.path, code: 'AMBIGUOUS_ASSET',
+                message: 'The asset path belongs to another file without an unambiguous relocation' });
+            }
+          } else if (!old) {
+            old = candidate ?? oldAssetsByPath.get(file.path);
+            if (!old && oldByKey.has(key)) errors.push({ relativePath: file.path, code: 'AMBIGUOUS_ASSET',
+              message: 'Duplicate content prevents unambiguous asset rename matching' });
+          }
+          if (old && claimed.has(old.id)) {
+            errors.push({ relativePath: file.path, code: 'AMBIGUOUS_ASSET',
+              message: 'The same asset matches multiple discovered files' });
+            old = undefined;
+          }
+          if (old) claimed.add(old.id);
+          assetMatches.set(file.path, old);
+        }
+      }
+
       await db.transaction(async (tx) => {
-        const projectByPath = new Map(previousProjects.map((project) => [project.relativePath, project]));
+        const stage = `.__print_pantry_scan_${id}`;
+        for (const { project, existing } of plans) {
+          if (existing && existing.relativePath !== project.directory.path) {
+            await tx.update(schema.projects).set({ relativePath: `${stage}/${existing.id}` })
+              .where(eq(schema.projects.id, existing.id));
+          }
+        }
+        for (const [path, asset] of assetMatches) {
+          if (asset && asset.relativePath !== path) {
+            await tx.update(schema.assets).set({ relativePath: `${stage}/${asset.id}` })
+              .where(eq(schema.assets.id, asset.id));
+          }
+        }
         const seenProjects: string[] = [];
         const seenAssets: string[] = [];
         const categoryCache = new Map<string, string>();
@@ -325,24 +445,8 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
           return parentId;
         }
 
-        for (const project of found.sort((a, b) => comparePaths(a.directory, b.directory))) {
+        for (const { project, files, existing } of plans) {
           const projectPath = project.directory.path;
-          const files = project.files.filter((file) => file.hash).sort(comparePaths);
-          if (!files.length) continue;
-          const key = signature(files.map((file) => ({
-            path: relative(join(libraryRoot, projectPath), file.fullPath).split(sep).join('/'),
-            hash: file.hash, size: file.stat.size,
-          })));
-          let existing = projectByPath.get(projectPath);
-          if (!existing && files.length === project.files.length && oldSignatures.has(key)) {
-            if (newSignatureCounts.get(key) === 1 && oldSignatureCounts.get(key) === 1) {
-              const candidate = oldSignatures.get(key)![0];
-              if (!seenProjects.includes(candidate.id) && !projectByPath.has(projectPath)) existing = candidate;
-            } else {
-              errors.push({ relativePath: projectPath, code: 'AMBIGUOUS_PROJECT',
-                message: 'Multiple projects share this file manifest; set a project boundary or resolve duplicates before matching renames' });
-            }
-          }
           const categoryId = await categoryFor(projectPath);
           const projectId = existing?.id ?? randomUUID();
           if (existing) {
@@ -355,22 +459,9 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
               name: basename(projectPath), ...project.metadata });
           }
           seenProjects.push(projectId);
-          const availableAssets = previousAssets.filter((asset) => asset.projectId === projectId);
-          const matched = new Set<string>();
           for (const [sortOrder, file] of files.entries()) {
             const projectRelativePath = relative(join(libraryRoot, projectPath), file.fullPath).split(sep).join('/');
-            const exact = oldAssetsByPath.get(file.path);
-            let old = exact ?? availableAssets.find(
-              (asset) => asset.projectRelativePath === projectRelativePath && !matched.has(asset.id));
-            if (!old) {
-              const candidates = availableAssets.filter((asset) => !matched.has(asset.id)
-                && asset.contentHash === file.hash && asset.sizeBytes === file.stat.size && asset.extension === file.extension);
-              const sameContent = files.filter((other) => other.hash === file.hash
-                && other.stat.size === file.stat.size && other.extension === file.extension);
-              if (candidates.length === 1 && sameContent.length === 1) old = candidates[0];
-              else if (candidates.length > 0) errors.push({ relativePath: file.path, code: 'AMBIGUOUS_ASSET',
-                message: 'Duplicate content prevents unambiguous asset rename matching' });
-            }
+            const old = assetMatches.get(file.path);
             const assetId = old?.id ?? randomUUID();
             const versions = previousVersionByAsset.get(assetId) ?? [];
             const current = versions.find((version) => version.id === old?.currentVersionId);
@@ -378,13 +469,14 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
             const versionId = sameVersion?.id ?? randomUUID();
             if (!old) await tx.insert(schema.assets).values({ id: assetId, projectId, relativePath: file.path,
               projectRelativePath, name: basename(file.path), sortOrder, kind: file.kind, extension: file.extension,
-              sizeBytes: file.stat.size, mtimeMs: Math.trunc(file.stat.mtimeMs), contentHash: file.hash,
+              sizeBytes: file.stat.size, mtimeMs: Math.trunc(file.stat.mtimeMs),
+              inode: file.stat.ino, device: file.stat.dev, contentHash: file.hash,
               currentVersionId: null });
             else {
-              matched.add(assetId);
               await tx.update(schema.assets).set({ projectId, relativePath: file.path, projectRelativePath,
                 name: basename(file.path), sortOrder,
                 kind: file.kind, extension: file.extension, sizeBytes: file.stat.size, mtimeMs: Math.trunc(file.stat.mtimeMs),
+                inode: file.stat.ino, device: file.stat.dev,
                 contentHash: file.hash, missingAt: null, updatedAt: new Date() })
                 .where(eq(schema.assets.id, assetId));
             }

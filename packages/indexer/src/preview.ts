@@ -126,12 +126,11 @@ export async function inspectThreeMf(file: string): Promise<string | null> {
       || !/<model(?:\s|\/|>)/.test((await readPrefix(zip, model)).toString())) {
       throw new Error('3MF archive has invalid content types or model XML');
     }
-    const thumbnails = entries.filter((entry) => /(?:^|\/)thumbnail\.(?:png|jpe?g)$/i.test(entry.fileName));
-    for (const entry of thumbnails) {
-      const bytes = await readEntry(zip, entry);
-      if (!imageType(bytes)) throw new Error(`Invalid 3MF thumbnail: ${entry.fileName}`);
-    }
-    return thumbnails[0]?.fileName ?? null;
+    const thumbnail = entries.find((entry) => /(?:^|\/)thumbnail\.(?:png|jpe?g)$/i.test(entry.fileName));
+    if (!thumbnail) return null;
+    const bytes = await readEntry(zip, thumbnail);
+    if (!imageType(bytes)) throw new Error(`Invalid 3MF thumbnail: ${thumbnail.fileName}`);
+    return thumbnail.fileName;
   } finally {
     await handle.close();
   }

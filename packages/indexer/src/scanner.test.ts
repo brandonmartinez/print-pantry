@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq, inArray, like } from 'drizzle-orm';
@@ -18,11 +18,12 @@ let prefix = '';
 let offlineRoot = '';
 const runIds: string[] = [];
 
-function zipFixture(files: Record<string, Buffer>): Buffer {
+function zipFixture(files: Record<string, Buffer> | [string, Buffer][]): Buffer {
+  const entries = Array.isArray(files) ? files : Object.entries(files);
   const local: Buffer[] = [];
   const central: Buffer[] = [];
   let offset = 0;
-  for (const [name, content] of Object.entries(files)) {
+  for (const [name, content] of entries) {
     const filename = Buffer.from(name);
     const header = Buffer.alloc(30);
     header.writeUInt32LE(0x04034b50, 0);
@@ -45,8 +46,8 @@ function zipFixture(files: Record<string, Buffer>): Buffer {
   const centralSize = central.reduce((size, chunk) => size + chunk.length, 0);
   const end = Buffer.alloc(22);
   end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(Object.keys(files).length, 8);
-  end.writeUInt16LE(Object.keys(files).length, 10);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
   end.writeUInt32LE(centralSize, 12);
   end.writeUInt32LE(offset, 16);
   return Buffer.concat([...local, ...central, end]);
@@ -205,6 +206,81 @@ describe('read-only catalog reconciliation', () => {
     await unlink(join(root, prefix, 'Category/Sub/Project/unsafe.stl'));
   });
 
+  it('keeps identities and authored metadata with the content when occupied project paths swap', async () => {
+    await fixture('Category/Sub/A/model.stl', 'model-A');
+    await fixture('Category/Sub/B/model.stl', 'model-B');
+    const aFile = join(root, prefix, 'Category/Sub/A/model.stl');
+    const bFile = join(root, prefix, 'Category/Sub/B/model.stl');
+    const sameTime = new Date('2020-01-01T00:00:00Z');
+    await utimes(aFile, sameTime, sameTime);
+    await utimes(bFile, sameTime, sameTime);
+    const indexer = createLibraryIndexer({ db, root });
+    expect((await scan(indexer)).status).toBe('succeeded');
+    const initialProjects = await db.select().from(schema.projects);
+    const a = initialProjects.find((item) => item.relativePath === `${prefix}/Category/Sub/A`)!;
+    const b = initialProjects.find((item) => item.relativePath === `${prefix}/Category/Sub/B`)!;
+    const initialAssets = await db.select().from(schema.assets);
+    const aAsset = initialAssets.find((item) => item.projectId === a.id)!;
+    const bAsset = initialAssets.find((item) => item.projectId === b.id)!;
+    await db.update(schema.projects).set({ notes: 'A authored', tags: ['A'] }).where(eq(schema.projects.id, a.id));
+    await db.update(schema.projects).set({ notes: 'B authored', tags: ['B'] }).where(eq(schema.projects.id, b.id));
+    const parent = join(root, prefix, 'Category/Sub');
+    await rename(join(parent, 'A'), join(parent, 'moving'));
+    await rename(join(parent, 'B'), join(parent, 'A'));
+    await rename(join(parent, 'moving'), join(parent, 'B'));
+    const result = await scan(indexer);
+    expect(result).toMatchObject({ status: 'succeeded', hashedFiles: 2 });
+    expect((await db.select().from(schema.projects).where(eq(schema.projects.id, a.id)))[0])
+      .toMatchObject({ relativePath: `${prefix}/Category/Sub/B`, notes: 'A authored', tags: ['A'], missingAt: null });
+    expect((await db.select().from(schema.projects).where(eq(schema.projects.id, b.id)))[0])
+      .toMatchObject({ relativePath: `${prefix}/Category/Sub/A`, notes: 'B authored', tags: ['B'], missingAt: null });
+    expect((await db.select().from(schema.assets).where(eq(schema.assets.id, aAsset.id)))[0])
+      .toMatchObject({ projectId: a.id, relativePath: `${prefix}/Category/Sub/B/model.stl`,
+        currentVersionId: aAsset.currentVersionId, missingAt: null });
+    expect((await db.select().from(schema.assets).where(eq(schema.assets.id, bAsset.id)))[0])
+      .toMatchObject({ projectId: b.id, relativePath: `${prefix}/Category/Sub/A/model.stl`,
+        currentVersionId: bAsset.currentVersionId, missingAt: null });
+  });
+
+  it('keeps stable asset and version IDs when two filenames exchange contents', async () => {
+    await fixture('Category/Sub/Project/one.stl', 'part-one');
+    await fixture('Category/Sub/Project/two.stl', 'part-two');
+    const indexer = createLibraryIndexer({ db, root });
+    await scan(indexer);
+    const initial = await db.select().from(schema.assets);
+    const one = initial.find((asset) => asset.name === 'one.stl')!;
+    const two = initial.find((asset) => asset.name === 'two.stl')!;
+    const parent = join(root, prefix, 'Category/Sub/Project');
+    await rename(join(parent, 'one.stl'), join(parent, 'moving.stl'));
+    await rename(join(parent, 'two.stl'), join(parent, 'one.stl'));
+    await rename(join(parent, 'moving.stl'), join(parent, 'two.stl'));
+    expect((await scan(indexer)).status).toBe('succeeded');
+    expect((await db.select().from(schema.assets).where(eq(schema.assets.id, one.id)))[0])
+      .toMatchObject({ name: 'two.stl', currentVersionId: one.currentVersionId });
+    expect((await db.select().from(schema.assets).where(eq(schema.assets.id, two.id)))[0])
+      .toMatchObject({ name: 'one.stl', currentVersionId: two.currentVersionId });
+  });
+
+  it('never reads an external metadata sidecar through a symlink', async () => {
+    await fixture('Category/Sub/Project/model.stl');
+    const outside = await mkdtemp(join(tmpdir(), 'pp-sidecar-external-'));
+    try {
+      const external = join(outside, 'metadata.json');
+      await writeFile(external, JSON.stringify({ description: 'external secret' }));
+      await symlink(external, join(root, prefix, 'Category/Sub/Project/metadata.json'));
+      const result = await scan(createLibraryIndexer({ db, root }));
+      expect(result.status).toBe('partial');
+      const errors = await db.select().from(schema.scanErrors).where(eq(schema.scanErrors.runId, result.id));
+      expect(errors.some((error) => error.code === 'SYMLINK')).toBe(true);
+      expect(errors.every((error) => !error.message.includes('external secret'))).toBe(true);
+      const [project] = await db.select().from(schema.projects)
+        .where(eq(schema.projects.relativePath, `${prefix}/Category/Sub/Project`));
+      expect(project.description).toBeNull();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('respects explicit collection and project boundaries and configurable ignored names', async () => {
     await fixture('Category/Sub/Collection/First/a.stl');
     await fixture('Category/Sub/Collection/Second/b.stl');
@@ -248,6 +324,14 @@ describe('read-only catalog reconciliation', () => {
       'Metadata/thumbnail.png': png,
     }));
     expect(await read3mfThumbnail(valid)).toEqual({ mimeType: 'image/png', bytes: png });
+    const duplicate = join(root, prefix, 'Category/Sub/Project/duplicate.3mf');
+    await writeFile(duplicate, zipFixture([
+      ['[Content_Types].xml', Buffer.from('<Types/>')],
+      ['3D/3dmodel.model', Buffer.from('<model/>')],
+      ['Metadata/thumbnail.png', png],
+      ['Metadata/thumbnail.png', Buffer.alloc(4 * 1024 * 1024 + 1)],
+    ]));
+    expect(await read3mfThumbnail(duplicate)).toEqual({ mimeType: 'image/png', bytes: png });
     const second = await scan(indexer);
     expect(second.status).toBe('partial');
     const [validAsset] = await db.select().from(schema.assets).where(eq(schema.assets.relativePath,
@@ -273,8 +357,11 @@ describe('read-only catalog reconciliation', () => {
     const [project] = await db.select().from(schema.projects)
       .where(eq(schema.projects.relativePath, `${prefix}/Category/Sub/Project`));
     await rm(join(root, prefix), { recursive: true });
+    await mkdir(join(root, 'lost+found'));
     expect((await scan(cautious)).status).toBe('partial');
     expect((await db.select().from(schema.projects).where(eq(schema.projects.id, project.id)))[0].missingAt).toBeNull();
+    const [asset] = await db.select().from(schema.assets).where(eq(schema.assets.projectId, project.id));
+    expect(asset.missingAt).toBeNull();
     const intentional = createLibraryIndexer({ db, root, allowEmptyLibrary: true });
     expect((await scan(intentional)).status).toBe('succeeded');
     expect((await db.select().from(schema.projects).where(eq(schema.projects.id, project.id)))[0].missingAt)

@@ -25,8 +25,8 @@ rescan route. Concurrent calls throw `ScanInProgressError`. Every scan records
 duplicate matches report `partial`. Only a successful, authoritative scan
 marks unseen projects/assets and their selected versions missing; records are
 never deleted. A previously populated root that is now empty is conservatively
-partial by default; use `allowEmptyLibrary: true` only if the mount is verified
-and intentionally empty.
+partial by default, even if placeholder directories remain; use
+`allowEmptyLibrary: true` only if the mount is verified and intentionally empty.
 
 Folders are recognized as category/subcategory/project trees, including
 deeper collections and format/variant subfolders. For ambiguous layouts,
@@ -36,11 +36,15 @@ case-insensitively, not every underscore-prefixed name. Project sidecars
 `project.json`, `metadata.json`, `source.url`, and `README.md` seed new
 projects without overwriting user-authored metadata. Assets retain their
 library-relative and project-relative paths; order by `assets.sortOrder` to
-show natural part order. Unchanged size/mtime pairs reuse previous SHA-256
-hashes; changes are streamed with bounded concurrency and pre/post stat checks.
+show natural part order. Unchanged size/mtime/device/inode tuples reuse
+previous SHA-256 hashes; moves and changes are streamed with bounded
+concurrency and pre/post stat checks. Unambiguous content-manifest relocations
+preserve project and asset IDs even if two occupied paths are exchanged.
 
 For 3MF thumbnails, `read3mfThumbnail(filePath)` returns
 `{ mimeType, bytes } | null` after bounded ZIP entry and image-header checks.
+Only the selected thumbnail is decompressed; duplicate thumbnail entries
+cannot multiply the decompression budget.
 Callers must validate the requested file against their configured library root
 and authorize the requester before invoking it. Mesh preview generation is
 outside this package.

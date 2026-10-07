@@ -55,6 +55,8 @@ export const assets = pgTable('assets', {
   extension: text('extension').notNull(),
   sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull(),
   mtimeMs: bigint('mtime_ms', { mode: 'number' }).notNull(),
+  inode: bigint('inode', { mode: 'number' }),
+  device: bigint('device', { mode: 'number' }),
   contentHash: text('content_hash'),
   currentVersionId: uuid('current_version_id').references((): AnyPgColumn => assetVersions.id),
   missingAt: timestamp('missing_at', { withTimezone: true }),
