@@ -40,9 +40,16 @@ show natural part order. Unchanged size/mtime/device/inode tuples reuse
 previous SHA-256 hashes; moves and changes are streamed with bounded
 concurrency and pre/post stat checks. Unambiguous content-manifest relocations
 preserve project and asset IDs even if two occupied paths are exchanged.
+If a moved project or file lands on a path whose previous occupant cannot be
+located unambiguously, reconciliation for that path is skipped and the scan
+remains partial until the conflict is resolved; neither identity is overwritten.
 
-For 3MF thumbnails, `read3mfThumbnail(filePath)` returns
+For 3MF thumbnails, `read3mfThumbnailFromHandle(handle)` returns
 `{ mimeType, bytes } | null` after bounded ZIP entry and image-header checks.
+The caller validates and opens a safe `FileHandle`; the indexer reads only that
+descriptor and never closes it. Expected invalid ZIP, model, and thumbnail
+data throw `Invalid3mfError`; filesystem and descriptor I/O errors remain
+distinct. `read3mfThumbnail(filePath)` retains the path-based convenience API.
 Only the selected thumbnail is decompressed; duplicate thumbnail entries
 cannot multiply the decompression budget.
 Callers must validate the requested file against their configured library root

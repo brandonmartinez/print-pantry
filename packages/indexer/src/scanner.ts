@@ -348,14 +348,16 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
           } else {
             errors.push({ relativePath: path, code: 'AMBIGUOUS_PROJECT',
               message: 'The destination path belongs to another project without an unambiguous relocation' });
+            return null;
           }
         } else if (!occupant && !candidate && oldSignatures.has(key)) {
           errors.push({ relativePath: path, code: 'AMBIGUOUS_PROJECT',
             message: 'Multiple projects share this file manifest; resolve duplicates before matching renames' });
         }
         return { project, files, existing };
-      });
+      }).filter((plan): plan is NonNullable<typeof plan> => plan !== null);
       const assetMatches = new Map<string, typeof previousAssets[number] | undefined>();
+      const blockedAssets = new Set<string>();
       const claimed = new Set<string>();
       const assetKey = (file: { hash: string; size: number; extension: string }) =>
         JSON.stringify([file.hash, file.size, file.extension]);
@@ -392,6 +394,8 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
             } else {
               errors.push({ relativePath: file.path, code: 'AMBIGUOUS_ASSET',
                 message: 'The asset path belongs to another file without an unambiguous relocation' });
+              blockedAssets.add(file.path);
+              continue;
             }
           } else if (!old) {
             old = candidate ?? oldAssetsByPath.get(file.path);
@@ -460,6 +464,7 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
           }
           seenProjects.push(projectId);
           for (const [sortOrder, file] of files.entries()) {
+            if (blockedAssets.has(file.path)) continue;
             const projectRelativePath = relative(join(libraryRoot, projectPath), file.fullPath).split(sep).join('/');
             const old = assetMatches.get(file.path);
             const assetId = old?.id ?? randomUUID();
@@ -495,7 +500,8 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
               .where(eq(schema.assets.id, assetId));
             seenAssets.push(assetId);
           }
-          const preview = files.find((file) => file.kind === 'image');
+          const preview = files.find((file) => file.kind === 'image'
+            && !file.validationError && !blockedAssets.has(file.path));
           if (preview) {
             const asset = (await tx.select({ id: schema.assets.id }).from(schema.assets)
               .where(eq(schema.assets.relativePath, preview.path)))[0];

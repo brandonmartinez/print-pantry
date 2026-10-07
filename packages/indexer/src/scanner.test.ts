@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rename, rm, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdtemp, mkdir, open, readFile, rename, rm, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq, inArray, like } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase, createPool, runMigrations, schema } from '@print-pantry/db';
-import { createLibraryIndexer, read3mfThumbnail, ScanInProgressError } from './index.js';
+import { createLibraryIndexer, Invalid3mfError, read3mfThumbnail, read3mfThumbnailFromHandle,
+  ScanInProgressError } from './index.js';
 
 const url = process.env.TEST_DATABASE_URL;
 if (!url) throw new Error('TEST_DATABASE_URL must point to an isolated test database');
@@ -184,6 +186,59 @@ describe('read-only catalog reconciliation', () => {
     expect((await db.select().from(schema.projects).where(eq(schema.projects.id, original.id)))[0].missingAt).toBeNull();
   });
 
+  it('leaves both project identities untouched when one moves onto the vacated path of another', async () => {
+    await fixture('Category/Sub/A/model.stl', 'content from A');
+    await fixture('Category/Sub/B/model.stl', 'content from B');
+    const indexer = createLibraryIndexer({ db, root });
+    await scan(indexer);
+    const originalProjects = await db.select().from(schema.projects);
+    const a = originalProjects.find((project) => project.relativePath === `${prefix}/Category/Sub/A`)!;
+    const b = originalProjects.find((project) => project.relativePath === `${prefix}/Category/Sub/B`)!;
+    await db.update(schema.projects).set({ notes: 'authored for A' }).where(eq(schema.projects.id, a.id));
+    await db.update(schema.projects).set({ notes: 'authored for B' }).where(eq(schema.projects.id, b.id));
+    const originalAssets = await db.select().from(schema.assets);
+    await rm(join(root, prefix, 'Category/Sub/B'), { recursive: true });
+    await rename(join(root, prefix, 'Category/Sub/A'), join(root, prefix, 'Category/Sub/B'));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await scan(indexer);
+      expect(result.status).toBe('partial');
+      expect((await db.select().from(schema.scanErrors).where(eq(schema.scanErrors.runId, result.id)))
+        .map((error) => error.code)).toContain('AMBIGUOUS_PROJECT');
+      expect((await db.select().from(schema.projects).where(eq(schema.projects.id, a.id)))[0])
+        .toMatchObject({ relativePath: a.relativePath, notes: 'authored for A', missingAt: null });
+      expect((await db.select().from(schema.projects).where(eq(schema.projects.id, b.id)))[0])
+        .toMatchObject({ relativePath: b.relativePath, notes: 'authored for B', missingAt: null });
+      const currentAssets = await db.select().from(schema.assets);
+      expect(currentAssets.map((asset) => [asset.id, asset.projectId, asset.relativePath, asset.currentVersionId])
+        .sort()).toEqual(originalAssets.map((asset) => [asset.id, asset.projectId, asset.relativePath, asset.currentVersionId])
+        .sort());
+      expect(currentAssets.every((asset) => asset.missingAt === null)).toBe(true);
+    }
+    expect(await db.select().from(schema.assetVersions)).toHaveLength(2);
+  });
+
+  it('leaves both asset identities untouched when one moves onto a vacated filename', async () => {
+    await fixture('Category/Sub/Project/a.stl', 'content from A');
+    await fixture('Category/Sub/Project/b.stl', 'content from B');
+    const indexer = createLibraryIndexer({ db, root });
+    await scan(indexer);
+    const original = await db.select().from(schema.assets);
+    const parent = join(root, prefix, 'Category/Sub/Project');
+    await unlink(join(parent, 'b.stl'));
+    await rename(join(parent, 'a.stl'), join(parent, 'b.stl'));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await scan(indexer);
+      expect(result.status).toBe('partial');
+      expect((await db.select().from(schema.scanErrors).where(eq(schema.scanErrors.runId, result.id)))
+        .map((error) => error.code)).toContain('AMBIGUOUS_ASSET');
+      const current = await db.select().from(schema.assets);
+      expect(current.map((asset) => [asset.id, asset.relativePath, asset.currentVersionId])
+        .sort()).toEqual(original.map((asset) => [asset.id, asset.relativePath, asset.currentVersionId]).sort());
+      expect(current.every((asset) => asset.missingAt === null)).toBe(true);
+    }
+    expect(await db.select().from(schema.assetVersions)).toHaveLength(2);
+  });
+
   it('protects metadata and missing state when storage is offline, empty, or only partially scanned', async () => {
     await fixture('Category/Sub/Project/model.stl');
     const indexer = createLibraryIndexer({ db, root });
@@ -339,6 +394,62 @@ describe('read-only catalog reconciliation', () => {
     const [version] = await db.select().from(schema.assetVersions).where(eq(schema.assetVersions.id,
       validAsset.currentVersionId!));
     expect(version.thumbnailEntry).toBe('Metadata/thumbnail.png');
+  });
+
+  it('reads 3MF previews from the supplied open handle even if its old path is replaced', async () => {
+    await fixture('Category/Sub/Project/broken.3mf', 'not a zip');
+    const broken = join(root, prefix, 'Category/Sub/Project/broken.3mf');
+    const invalidHandle = await open(broken, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      await expect(read3mfThumbnailFromHandle(invalidHandle)).rejects.toBeInstanceOf(Invalid3mfError);
+      expect((await invalidHandle.stat()).size).toBeGreaterThan(0);
+    } finally {
+      await invalidHandle.close();
+    }
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const file = join(root, prefix, 'Category/Sub/Project/valid.3mf');
+    await writeFile(file, zipFixture({
+      '[Content_Types].xml': Buffer.from('<Types/>'),
+      '3D/3dmodel.model': Buffer.from('<model/>'),
+      'Metadata/thumbnail.png': png,
+    }));
+    const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      await rename(file, `${file}.moved`);
+      await writeFile(file, 'replacement is not a zip');
+      expect(await read3mfThumbnailFromHandle(handle)).toEqual({ mimeType: 'image/png', bytes: png });
+      expect((await handle.stat()).size).toBeGreaterThan(png.length);
+      await expect(read3mfThumbnail(file)).rejects.toBeInstanceOf(Invalid3mfError);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('persists image validation errors while retaining malformed covers and healthy mesh assets', async () => {
+    await fixture('Category/Sub/Project/model.stl', 'mesh bytes');
+    await fixture('Category/Sub/Project/cover.png', '<html>not an image</html>');
+    const indexer = createLibraryIndexer({ db, root });
+    const result = await scan(indexer);
+    expect(result.status).toBe('partial');
+    const [project] = await db.select().from(schema.projects)
+      .where(eq(schema.projects.relativePath, `${prefix}/Category/Sub/Project`));
+    expect(project.previewAssetId).toBeNull();
+    const assets = await db.select().from(schema.assets).where(eq(schema.assets.projectId, project.id));
+    expect(assets).toHaveLength(2);
+    const cover = assets.find((asset) => asset.name === 'cover.png')!;
+    const model = assets.find((asset) => asset.name === 'model.stl')!;
+    const [badVersion] = await db.select().from(schema.assetVersions)
+      .where(eq(schema.assetVersions.id, cover.currentVersionId!));
+    const [goodVersion] = await db.select().from(schema.assetVersions)
+      .where(eq(schema.assetVersions.id, model.currentVersionId!));
+    expect(badVersion.validationError).toContain('Image header');
+    expect(goodVersion.validationError).toBeNull();
+    expect(await readFile(join(root, cover.relativePath), 'utf8')).toBe('<html>not an image</html>');
+    expect((await scan(indexer)).status).toBe('partial');
+    expect(await db.select().from(schema.assetVersions)).toHaveLength(2);
   });
 
   it('rejects overlapping rescans without starting a second run', async () => {
