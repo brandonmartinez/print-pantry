@@ -36,6 +36,13 @@
       "when": 1791397413526,
       "tag": "0004_handy_kabuki",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791399684508,
+      "tag": "0005_curly_sentinel",
+      "breakpoints": true
     }
   ]
 }

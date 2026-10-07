@@ -1,11 +1,22 @@
+import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { fileURLToPath } from 'node:url';
-import { createDatabase, createPool } from './index.js';
+import { createPool } from './index.js';
 
 export async function runMigrations(connectionString: string, migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.url))) {
   const pool = createPool(connectionString);
   try {
-    await migrate(createDatabase(pool), { migrationsFolder });
+    const client = await pool.connect();
+    try {
+      await client.query('SELECT pg_advisory_lock(294853117)');
+      try {
+        await migrate(drizzle(client), { migrationsFolder });
+      } finally {
+        await client.query('SELECT pg_advisory_unlock(294853117)');
+      }
+    } finally {
+      client.release();
+    }
   } finally {
     await pool.end();
   }

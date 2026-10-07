@@ -1,5 +1,5 @@
 import { relations, sql } from 'drizzle-orm';
-import { bigint, index, integer, pgTable, text, timestamp, uuid, varchar, type AnyPgColumn } from 'drizzle-orm/pg-core';
+import { bigint, check, index, integer, pgTable, text, timestamp, uuid, varchar, type AnyPgColumn } from 'drizzle-orm/pg-core';
 
 export const appMetadata = pgTable('app_metadata', {
   key: varchar('key', { length: 128 }).primaryKey(),
@@ -114,6 +114,64 @@ export const sessions = pgTable('sessions', {
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [index('sessions_user_idx').on(table.userId)]);
+
+export const printRequests = pgTable('print_requests', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: uuid('project_id').notNull().references(() => projects.id),
+  projectName: text('project_name').notNull(),
+  requesterId: uuid('requester_id').notNull().references(() => users.id),
+  status: text('status', { enum: ['requested', 'queued', 'printing', 'completed', 'declined', 'canceled'] }).notNull(),
+  quantity: integer('quantity').notNull(),
+  material: varchar('material', { length: 100 }),
+  color: varchar('color', { length: 100 }),
+  notes: varchar('notes', { length: 2000 }),
+  queuePosition: integer('queue_position'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('print_requests_requester_idx').on(table.requesterId, table.createdAt),
+  index('print_requests_queue_idx').on(table.status, table.queuePosition),
+  check('print_requests_quantity_check', sql`${table.quantity} BETWEEN 1 AND 100`),
+  check('print_requests_queue_position_check', sql`(${table.status} = 'queued' AND ${table.queuePosition} > 0) OR (${table.status} <> 'queued' AND ${table.queuePosition} IS NULL)`),
+]);
+
+export const printRequestFiles = pgTable('print_request_files', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requestId: uuid('request_id').notNull().references(() => printRequests.id),
+  assetId: uuid('asset_id').notNull().references(() => assets.id),
+  versionId: uuid('version_id').notNull().references(() => assetVersions.id),
+  name: text('name').notNull(),
+  relativePath: text('relative_path').notNull(),
+  fileType: text('file_type').notNull(),
+  extension: text('extension').notNull(),
+  sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull(),
+  contentHash: text('content_hash').notNull(),
+}, (table) => [
+  index('print_request_files_request_idx').on(table.requestId),
+  check('print_request_files_relative_path_check', sql`${table.relativePath} !~ '^/'`),
+]);
+
+export const printRequestHistory = pgTable('print_request_history', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requestId: uuid('request_id').notNull().references(() => printRequests.id),
+  actorId: uuid('actor_id').notNull().references(() => users.id),
+  action: text('action', { enum: ['submit', 'approve', 'decline', 'start', 'complete', 'cancel', 'reorder', 'select_next'] }).notNull(),
+  fromStatus: text('from_status'),
+  toStatus: text('to_status'),
+  fromPosition: integer('from_position'),
+  toPosition: integer('to_position'),
+  note: varchar('note', { length: 2000 }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [index('print_request_history_request_idx').on(table.requestId, table.createdAt)]);
+
+export const requestQueueState = pgTable('request_queue_state', {
+  id: integer('id').primaryKey(),
+  revision: integer('revision').notNull().default(0),
+  selectedNextId: uuid('selected_next_id').references(() => printRequests.id),
+}, (table) => [
+  check('request_queue_state_singleton_check', sql`${table.id} = 1`),
+  check('request_queue_state_revision_check', sql`${table.revision} >= 0`),
+]);
 
 export const projectRelations = relations(projects, ({ one, many }) => ({
   category: one(categories, { fields: [projects.categoryId], references: [categories.id] }),

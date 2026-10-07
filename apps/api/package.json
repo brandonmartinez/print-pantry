@@ -8,16 +8,18 @@
     "dev": "tsx watch --include '../../packages/db/dist/**/*.js' --include '../../packages/contracts/dist/**/*.js' src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src",
+    "test": "vitest run src --no-file-parallelism",
     "account:create": "node dist/provision.js"
   },
   "dependencies": {
     "@print-pantry/contracts": "0.1.0",
     "@print-pantry/db": "0.1.0",
     "@print-pantry/indexer": "0.1.0",
-    "fastify": "^5.6.2"
+    "fastify": "^5.6.2",
+    "pg": "^8.23.1"
   },
   "devDependencies": {
+    "@types/pg": "^8.23.1",
     "tsx": "^4.21.0"
   }
 }
