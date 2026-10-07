@@ -23,8 +23,35 @@ describe('versioned PostgreSQL migrations', () => {
       expect(records).toHaveLength(1);
       expect(records[0].value).toBe('test');
       expect(records[0].updatedAt).toBeInstanceOf(Date);
+      const indexes = await pool.query<{ indexname: string }>(`
+        SELECT indexname FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND indexname IN ('projects_search_idx', 'assets_search_idx', 'categories_search_idx')
+      `);
+      expect(indexes.rows.map((row) => row.indexname).sort()).toEqual([
+        'assets_search_idx', 'categories_search_idx', 'projects_search_idx',
+      ]);
     } finally {
       await db.delete(schema.appMetadata).where(eq(schema.appMetadata.key, key));
+    }
+  });
+
+  it('stores typed accounts and expiry-bound hashed sessions', async () => {
+    const username = `test-${randomUUID()}`;
+    const [user] = await createDatabase(pool).insert(schema.users).values({
+      username, passwordHash: 'fixture-hash', role: 'requester',
+    }).returning();
+    try {
+      const [session] = await createDatabase(pool).insert(schema.sessions).values({
+        userId: user.id, tokenHash: randomUUID(), expiresAt: new Date(Date.now() + 60_000),
+      }).returning();
+      try {
+        expect(session).toMatchObject({ userId: user.id, expiresAt: expect.any(Date) });
+      } finally {
+        await createDatabase(pool).delete(schema.sessions).where(eq(schema.sessions.id, session.id));
+      }
+    } finally {
+      await createDatabase(pool).delete(schema.users).where(eq(schema.users.id, user.id));
     }
   });
 });
