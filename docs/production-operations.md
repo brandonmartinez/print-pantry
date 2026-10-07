@@ -59,6 +59,9 @@ docker compose -p <composeproject> -f compose.prod.yml config --quiet
 
 Use a dedicated database and database role if choosing the external
 override, and verify the intended endpoint separately before migrations.
+The migration command refuses databases containing unrelated schemas or
+tables before applying any migration; it never provisions an external server,
+role, or database automatically.
 Set exact private HTTPS `PUBLIC_ORIGIN` and `COOKIE_SECURE=true`. Docker
 Compose v5 cannot grant
 BuildKit filesystem access to the host npm configuration through `docker
@@ -168,6 +171,8 @@ with `up -d --wait api web`. Do not reset the database volume or replace a
 failed migration with an empty database. When using an external database,
 include `-f compose.external.yml` consistently in each Compose command.
 Never point a migration or test command at an unrelated external schema.
+If the dedicated-database guard rejects the target, correct the URL or
+provision an empty application-only database; do not bypass it.
 
 Rescans are read-only. Operators may trigger them from the catalog UI/API, and
 the scheduler uses `SCAN_INTERVAL_MINUTES`. Configure ignored directories only
