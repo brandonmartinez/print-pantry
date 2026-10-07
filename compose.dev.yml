@@ -13,6 +13,11 @@ services:
       TEST_DATABASE_URL: postgresql://pantry:development-only@db:5432/print_pantry_test
       API_PORT: "3000"
       WEB_PORT: "5173"
+      LIBRARY_ROOT: /mnt/library
+      LIBRARY_IGNORED_DIRS: ${LIBRARY_IGNORED_DIRS:-}
+      CLIENT_MOUNT_PREFIX: ${CLIENT_MOUNT_PREFIX:-}
+      SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-30}
+      COOKIE_SECURE: "false"
       NPM_CONFIG_USERCONFIG: /home/node/.npmrc
       NPM_CONFIG_CAFILE: ${HOST_NPM_CA_FILE:+/run/pantry-npm-ca.pem}
       NODE_EXTRA_CA_CERTS: ${HOST_NPM_CA_FILE:+/run/pantry-npm-ca.pem}
