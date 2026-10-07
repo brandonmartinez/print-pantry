@@ -18,6 +18,7 @@ const token = randomUUID().slice(0, 8);
 const rootName = `pantry-${token}`;
 const username = `operator-${token}`;
 const requesterName = `requester-${token}`;
+const scanIds: string[] = [];
 let root: string;
 let outside: string;
 let server: ReturnType<typeof buildServer>;
@@ -27,6 +28,12 @@ let requesterCookie: string;
 let projectId: string;
 let assetId: string;
 let versionId: string;
+
+async function scanLibrary() {
+  const result = await indexer.rescan();
+  scanIds.push(result.id);
+  return result;
+}
 
 async function login(name: string): Promise<string> {
   const result = await server.inject({
@@ -52,7 +59,7 @@ beforeAll(async () => {
   ));
   await writeFile(path.join(outside, 'private.stl'), 'outside the library');
   indexer = createLibraryIndexer({ db: createDatabase(pool), root, hashConcurrency: 2 });
-  const scan = await indexer.rescan();
+  const scan = await scanLibrary();
   expect(scan.status).toBe('succeeded');
   const passwordHash = await hashPassword('a synthetic test passphrase');
   await pool.query(
@@ -74,6 +81,31 @@ afterAll(async () => {
     await pool.query('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ($1, $2))',
       [username, requesterName]);
     await pool.query('DELETE FROM users WHERE username IN ($1, $2)', [username, requesterName]);
+    await pool.query('DELETE FROM project_boundary_overrides WHERE relative_path = $1 OR relative_path LIKE $2',
+      [rootName, `${rootName}/%`]);
+    const projects = await pool.query<{ id: string }>(
+      'SELECT id FROM projects WHERE relative_path LIKE $1', [`${rootName}/%`]);
+    const ids = projects.rows.map(({ id }) => id);
+    if (ids.length) {
+      await pool.query('UPDATE assets SET current_version_id = NULL WHERE project_id = ANY($1::uuid[])', [ids]);
+      await pool.query(
+        'DELETE FROM asset_versions WHERE asset_id IN (SELECT id FROM assets WHERE project_id = ANY($1::uuid[]))',
+        [ids],
+      );
+      await pool.query('DELETE FROM assets WHERE project_id = ANY($1::uuid[])', [ids]);
+      await pool.query('DELETE FROM projects WHERE id = ANY($1::uuid[])', [ids]);
+    }
+    const categories = await pool.query<{ id: string }>(
+      'SELECT id FROM categories WHERE relative_path = $1 OR relative_path LIKE $2 ORDER BY length(relative_path) DESC',
+      [rootName, `${rootName}/%`],
+    );
+    for (const category of categories.rows) {
+      await pool.query('DELETE FROM categories WHERE id = $1', [category.id]);
+    }
+    if (scanIds.length) {
+      await pool.query('DELETE FROM scan_errors WHERE run_id = ANY($1::uuid[])', [scanIds]);
+      await pool.query('DELETE FROM scan_runs WHERE id = ANY($1::uuid[])', [scanIds]);
+    }
   } finally {
     await pool.end();
     if (root) await rm(root, { recursive: true, force: true });
@@ -172,7 +204,7 @@ describe('authenticated catalog and local files', () => {
       method: 'PATCH', url, headers: { cookie: operatorCookie },
       payload: { description: 'Authored text', tags: ['test'], sourceUrl: 'https://example.org/model' },
     })).statusCode).toBe(200);
-    const scan = await indexer.rescan();
+    const scan = await scanLibrary();
     expect(scan.hashedFiles).toBe(0);
     const detail = await server.inject({ method: 'GET', url, headers: { cookie: operatorCookie } });
     expect(detail.json().project.description).toBe('Authored text');
@@ -190,14 +222,14 @@ describe('authenticated catalog and local files', () => {
       'base64',
     );
     await writeFile(cover, 'not a PNG');
-    expect((await indexer.rescan()).status).toBe('partial');
+    expect((await scanLibrary()).status).toBe('partial');
     const preview = await server.inject({
       method: 'GET', url: `/catalog/projects/${projectId}/preview`, headers: { cookie: requesterCookie },
     });
     expect(preview.statusCode).toBe(200);
     expect(preview.headers['content-type']).toContain('image/svg+xml');
     await writeFile(cover, valid);
-    expect((await indexer.rescan()).status).toBe('succeeded');
+    expect((await scanLibrary()).status).toBe('succeeded');
   });
 
   it('rejects symlink escapes and marks historical versions unavailable', async () => {
@@ -210,7 +242,7 @@ describe('authenticated catalog and local files', () => {
     await rm(file);
     await writeFile(file,
       'solid changed\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 3 0 0\nvertex 0 3 0\nendloop\nendfacet\nendsolid changed');
-    expect((await indexer.rescan()).status).toBe('succeeded');
+    expect((await scanLibrary()).status).toBe('succeeded');
     const detail = await server.inject({
       method: 'GET', url: `/catalog/projects/${projectId}`, headers: { cookie: operatorCookie },
     });
@@ -232,7 +264,7 @@ describe('authenticated catalog and local files', () => {
       headers: { cookie: operatorCookie },
     });
     expect(response.statusCode).toBe(503);
-    expect((await indexer.rescan()).status).toBe('offline');
+    expect((await scanLibrary()).status).toBe('offline');
     const detail = await server.inject({
       method: 'GET', url: `/catalog/projects/${projectId}`, headers: { cookie: operatorCookie },
     });
