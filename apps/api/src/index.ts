@@ -1,5 +1,5 @@
 import { createDatabase, createPool } from '@print-pantry/db';
-import { createLibraryIndexer, read3mfThumbnailFromHandle } from '@print-pantry/indexer';
+import { createLibraryIndexer, read3mfGeometryFromHandle, read3mfThumbnailFromHandle } from '@print-pantry/indexer';
 import { clientPath } from './files.js';
 import { productionOrigin } from './production-config.js';
 import { buildServer } from './server.js';
@@ -35,7 +35,8 @@ const indexer = createLibraryIndexer({
 });
 const server = buildServer(pool, {
   pool, root, clientMountPrefix: process.env.CLIENT_MOUNT_PREFIX,
-  indexer, read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: cookieSecure === 'true',
+  indexer, read3mfGeometry: read3mfGeometryFromHandle,
+  read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: cookieSecure === 'true',
 }, publicOrigin);
 const port = Number(process.env.API_PORT ?? 3000);
 

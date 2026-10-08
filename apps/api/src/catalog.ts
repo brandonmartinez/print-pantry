@@ -4,7 +4,9 @@ import type { FileHandle } from 'node:fs/promises';
 import type { createPool } from '@print-pantry/db';
 import { Invalid3mfError } from '@print-pantry/indexer';
 import { clientPath, InvalidLibraryPathError, LibraryUnavailableError, openLibraryFile, validateRelativePath } from './files.js';
-import { InvalidMeshError, MeshChangedError, readStlTriangles, renderStlPreview } from './mesh-preview.js';
+import {
+  interactivePreviewTriangles, InvalidMeshError, MeshChangedError, readStlTriangles, renderStlPreview,
+} from './mesh-preview.js';
 import { validatedImageType } from './image-validation.js';
 import { createPreviewLimiter, PreviewBusyError } from './preview-limit.js';
 import type { createAuth } from './auth.js';
@@ -20,9 +22,14 @@ export type Indexer = {
   getStatus(): { running: boolean; lastScan: ScanResult | null };
 };
 export type ThumbnailReader = (handle: FileHandle) => Promise<{ mimeType: string; bytes: Buffer } | null>;
+export type GeometryReader = (handle: FileHandle) => Promise<{
+  triangles: [[number, number, number], [number, number, number], [number, number, number]][];
+  sampled: boolean;
+}>;
 export type CatalogOptions = {
   pool: Pool; root: string; clientMountPrefix?: string; indexer: Indexer;
   read3mfThumbnail?: ThumbnailReader;
+  read3mfGeometry?: GeometryReader;
 };
 
 type ProjectRow = {
@@ -71,7 +78,7 @@ function summary(row: ProjectRow, mount?: string) {
     subcategory: segments.slice(1).join('/') || null,
     description: row.description, tags: row.tags, available: !row.missing_at,
     assetCount: Number(row.asset_count), clientPath: clientPath(mount, row.relative_path),
-    previewUrl: row.preview_asset_id ? `/api/catalog/projects/${row.id}/preview` : null,
+    previewUrl: row.preview_asset_id ? `/api/catalog/projects/${row.id}/preview?renderer=3` : null,
   };
 }
 
@@ -141,9 +148,9 @@ function assetResponse(row: AssetRow, mount?: string) {
     previewUrl: !row.missing_at && !row.validation_error && !!row.current_version_id && ((row.kind === 'image' &&
       ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(row.extension.toLowerCase())) ||
       (row.kind === 'mesh' && ['.stl', '.3mf'].includes(row.extension.toLowerCase()))) ?
-      `/api/catalog/assets/${row.id}/preview` : null,
+      `/api/catalog/assets/${row.id}/preview?renderer=3` : null,
     geometryUrl: !row.missing_at && !row.validation_error && row.kind === 'mesh' &&
-      row.extension.toLowerCase() === '.stl' ?
+      ['.stl', '.3mf'].includes(row.extension.toLowerCase()) ?
       `/api/catalog/assets/${row.id}/geometry` : null,
   };
 }
@@ -494,8 +501,12 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     if (asset.missing_at || !asset.current_version_id) {
       return reply.code(410).send({ error: 'Mesh source is unavailable' });
     }
-    if (asset.kind !== 'mesh' || asset.extension.toLowerCase() !== '.stl') {
-      return reply.code(415).send({ error: 'Interactive preview currently supports STL meshes' });
+    const extension = asset.extension.toLowerCase();
+    if (asset.kind !== 'mesh' || !['.stl', '.3mf'].includes(extension)) {
+      return reply.code(415).send({ error: 'Interactive preview supports STL and 3MF meshes' });
+    }
+    if (extension === '.3mf' && !options.read3mfGeometry) {
+      return reply.code(415).send({ error: '3MF geometry preview is unavailable' });
     }
     try {
       return await preview(async () => {
@@ -504,9 +515,14 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
           if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
             return reply.code(409).send({ error: 'Mesh changed since indexing; rescan before previewing' });
           }
-          const triangles = await readStlTriangles(handle, stats.size);
+          const geometry = extension === '.3mf'
+            ? await options.read3mfGeometry!(handle)
+            : await (async () => {
+              const triangles = await readStlTriangles(handle, stats.size, interactivePreviewTriangles);
+              return { triangles, sampled: triangles.length >= interactivePreviewTriangles };
+            })();
           reply.header('Cache-Control', 'private, max-age=300');
-          return { triangles, sampled: true };
+          return geometry;
         } finally {
           await handle.close();
         }

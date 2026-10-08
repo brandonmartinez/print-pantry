@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { eq, inArray, like } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase, createPool, runMigrations, schema } from '@print-pantry/db';
-import { createLibraryIndexer, Invalid3mfError, read3mfThumbnail, read3mfThumbnailFromHandle,
+import { createLibraryIndexer, Invalid3mfError, read3mfGeometryFromHandle, read3mfThumbnail, read3mfThumbnailFromHandle,
   ScanInProgressError } from './index.js';
 
 const url = process.env.TEST_DATABASE_URL;
@@ -110,6 +110,31 @@ afterEach(async () => {
 });
 
 describe('read-only catalog reconciliation', () => {
+  it('extracts transformed mesh geometry from a 3MF build', async () => {
+    const model = `<?xml version="1.0" encoding="UTF-8"?>
+      <model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+        <resources>
+          <object id="1" type="model"><mesh>
+            <vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>
+            <triangles><triangle v1="0" v2="1" v3="2"/></triangles>
+          </mesh></object>
+          <object id="2" type="model"><components><component objectid="1" transform="1 0 0 0 1 0 0 0 1 2 0 0"/></components></object>
+        </resources>
+        <build><item objectid="2" transform="1 0 0 0 1 0 0 0 1 0 3 0"/></build>
+      </model>`;
+    const file = join(root, 'transformed.3mf');
+    await writeFile(file, zipFixture({ '3D/3dmodel.model': Buffer.from(model) }));
+    const handle = await open(file);
+    try {
+      expect(await read3mfGeometryFromHandle(handle)).toEqual({
+        triangles: [[[2, 3, 0], [3, 3, 0], [2, 4, 0]]],
+        sampled: false,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('indexes sidecars and associated paths, then skips unchanged hashes and preserves authored metadata', async () => {
     await fixture('Models/Project/parts/Part 2.stl');
     await fixture('Models/Project/parts/Part 10.stl');

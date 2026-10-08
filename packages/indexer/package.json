@@ -5,7 +5,12 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch --preserveWatchOutput",
@@ -15,6 +20,7 @@
   "dependencies": {
     "@print-pantry/db": "0.1.0",
     "drizzle-orm": "^0.45.1",
+    "fast-xml-parser": "^5.11.2",
     "yauzl": "^3.2.0"
   },
   "devDependencies": {

@@ -15,7 +15,11 @@ it('renders a bounded generated SVG for validated binary STL content', async () 
     await writeFile(file, bytes);
     const handle = await open(file);
     try {
-      expect((await renderStlPreview(handle, bytes.length)).toString()).toContain('<polygon');
+      const preview = (await renderStlPreview(handle, bytes.length)).toString();
+      expect(preview).toContain('<polygon');
+      expect(preview).toContain('<ellipse');
+      expect(preview).toContain('fill="rgb(');
+      expect(preview).not.toContain('stroke="#526b58"');
       expect(await readStlTriangles(handle, bytes.length)).toHaveLength(1);
       await expect(renderStlPreview(handle, 33 * 1024 * 1024)).rejects.toThrow('too large');
     } finally {

@@ -1,9 +1,15 @@
 import { constants } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import yauzl, { type Entry, type ZipFile } from 'yauzl';
 
 const MAX_ENTRIES = 4096;
 const MAX_THUMBNAIL_BYTES = 4 * 1024 * 1024;
+const MAX_MODEL_BYTES = 16 * 1024 * 1024;
+const MAX_MODEL_TRIANGLES = 250_000;
+const PREVIEW_TRIANGLES = 75_000;
+export type Point3mf = [number, number, number];
+export type Triangle3mf = [Point3mf, Point3mf, Point3mf];
 
 export class Invalid3mfError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -64,6 +70,27 @@ function readEntry(zip: ZipFile, entry: Entry): Promise<Buffer> {
       });
       stream.once('end', () => resolve(Buffer.concat(chunks)));
       stream.once('error', (error) => reject(archiveError(error)));
+    });
+  });
+}
+
+function readModelEntry(zip: ZipFile, entry: Entry): Promise<Buffer> {
+  if (entry.uncompressedSize > MAX_MODEL_BYTES) throw new Invalid3mfError('3MF model exceeds size limit');
+  return new Promise((resolve, reject) => {
+    zip.openReadStream(entry, (error, stream) => {
+      if (error || !stream) {
+        reject(archiveError(error ?? new Invalid3mfError('Unable to read 3MF model')));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      stream.on('data', (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > MAX_MODEL_BYTES) stream.destroy(new Invalid3mfError('3MF model exceeds size limit'));
+        else chunks.push(chunk);
+      });
+      stream.once('end', () => resolve(Buffer.concat(chunks)));
+      stream.once('error', (reason) => reject(archiveError(reason)));
     });
   });
 }
@@ -175,4 +202,123 @@ export async function read3mfThumbnail(file: string): Promise<{ mimeType: 'image
   } finally {
     await handle.close();
   }
+}
+
+type Transform3mf = [number, number, number, number, number, number, number, number, number, number, number, number];
+const identityTransform: Transform3mf = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+
+function nodes(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) return value.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
+  return value && typeof value === 'object' ? [value as Record<string, unknown>] : [];
+}
+
+function finiteNumber(value: unknown, label: string): number {
+  const number = Number(value);
+  if (!Number.isFinite(number) || Math.abs(number) > 1e9) throw new Invalid3mfError(`Invalid 3MF ${label}`);
+  return number;
+}
+
+function transform(value: unknown): Transform3mf {
+  if (value == null || value === '') return identityTransform;
+  const values = String(value).trim().split(/\s+/).map((item) => finiteNumber(item, 'transform'));
+  if (values.length !== 12) throw new Invalid3mfError('Invalid 3MF transform');
+  return values as Transform3mf;
+}
+
+function transformPoint([x, y, z]: Point3mf, matrix: Transform3mf): Point3mf {
+  return [
+    x * matrix[0] + y * matrix[3] + z * matrix[6] + matrix[9],
+    x * matrix[1] + y * matrix[4] + z * matrix[7] + matrix[10],
+    x * matrix[2] + y * matrix[5] + z * matrix[8] + matrix[11],
+  ];
+}
+
+function parse3mfModel(documents: { path: string; xml: string }[]): { triangles: Triangle3mf[]; sampled: boolean } {
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', removeNSPrefix: true });
+  const models = new Map<string, Record<string, unknown>>();
+  for (const document of documents) {
+    if (XMLValidator.validate(document.xml) !== true) throw new Invalid3mfError('3MF model XML is invalid');
+    const parsed = parser.parse(document.xml) as { model?: Record<string, unknown> };
+    if (!parsed.model) throw new Invalid3mfError('3MF model root is missing');
+    models.set(document.path.replace(/^\//, ''), parsed.model);
+  }
+  const rootPath = documents.find((document) => /^3D\/3dmodel\.model$/i.test(document.path))?.path
+    ?? documents[0]?.path;
+  const rootModel = rootPath ? models.get(rootPath.replace(/^\//, '')) : undefined;
+  const build = rootModel?.build as Record<string, unknown> | undefined;
+  if (!rootModel || !build) throw new Invalid3mfError('3MF model has no buildable objects');
+
+  const resolveObject = (partPath: string, id: string, ancestry: Set<string>): Triangle3mf[] => {
+    const normalizedPath = partPath.replace(/^\//, '');
+    const objectKey = `${normalizedPath}#${id}`;
+    if (ancestry.has(objectKey) || ancestry.size > 32) throw new Invalid3mfError('3MF component cycle exceeds limits');
+    const part = models.get(normalizedPath);
+    const resources = part?.resources as Record<string, unknown> | undefined;
+    const objects = new Map(nodes(resources?.object).map((object) => [String(object.id), object]));
+    const object = objects.get(id);
+    if (!object) throw new Invalid3mfError('3MF component references an unknown object');
+    const nextAncestry = new Set(ancestry).add(objectKey);
+    const mesh = object.mesh as Record<string, unknown> | undefined;
+    if (mesh) {
+      const verticesNode = mesh.vertices as Record<string, unknown> | undefined;
+      const trianglesNode = mesh.triangles as Record<string, unknown> | undefined;
+      const vertices = nodes(verticesNode?.vertex).map((vertex): Point3mf => [
+        finiteNumber(vertex.x, 'vertex'), finiteNumber(vertex.y, 'vertex'), finiteNumber(vertex.z, 'vertex'),
+      ]);
+      const result = nodes(trianglesNode?.triangle).map((triangle): Triangle3mf => {
+        const indices = [triangle.v1, triangle.v2, triangle.v3].map((value) => finiteNumber(value, 'triangle index'));
+        if (indices.some((index) => !Number.isInteger(index) || index < 0 || index >= vertices.length)) {
+          throw new Invalid3mfError('3MF triangle references an invalid vertex');
+        }
+        return [vertices[indices[0]], vertices[indices[1]], vertices[indices[2]]];
+      });
+      if (result.length > MAX_MODEL_TRIANGLES) throw new Invalid3mfError('3MF model has too many triangles');
+      return result;
+    }
+    const components = object.components as Record<string, unknown> | undefined;
+    const result: Triangle3mf[] = [];
+    for (const component of nodes(components?.component)) {
+      const matrix = transform(component.transform);
+      const componentPath = component.path == null ? normalizedPath : String(component.path).replace(/^\//, '');
+      for (const triangle of resolveObject(componentPath, String(component.objectid), nextAncestry)) {
+        result.push(triangle.map((point) => transformPoint(point, matrix)) as Triangle3mf);
+        if (result.length > MAX_MODEL_TRIANGLES) throw new Invalid3mfError('3MF model has too many triangles');
+      }
+    }
+    return result;
+  };
+
+  const triangles: Triangle3mf[] = [];
+  for (const item of nodes(build.item)) {
+    const matrix = transform(item.transform);
+    const itemPath = item.path == null ? rootPath! : String(item.path).replace(/^\//, '');
+    for (const triangle of resolveObject(itemPath, String(item.objectid), new Set())) {
+      triangles.push(triangle.map((point) => transformPoint(point, matrix)) as Triangle3mf);
+      if (triangles.length > MAX_MODEL_TRIANGLES) throw new Invalid3mfError('3MF model has too many triangles');
+    }
+  }
+  if (!triangles.length) throw new Invalid3mfError('3MF model has no mesh triangles');
+  if (triangles.length <= PREVIEW_TRIANGLES) return { triangles, sampled: false };
+  const stride = triangles.length / PREVIEW_TRIANGLES;
+  return {
+    triangles: Array.from({ length: PREVIEW_TRIANGLES }, (_, index) => triangles[Math.floor(index * stride)]),
+    sampled: true,
+  };
+}
+
+export async function read3mfGeometryFromHandle(
+  handle: FileHandle,
+): Promise<{ triangles: Triangle3mf[]; sampled: boolean }> {
+  const zip = await openZip(handle);
+  const entries = await listEntries(zip);
+  const models = entries.filter((entry) => /^3D\/.+\.model$/i.test(entry.fileName));
+  if (!models.length) throw new Invalid3mfError('3MF model part is missing');
+  if (models.reduce((size, entry) => size + entry.uncompressedSize, 0) > MAX_MODEL_BYTES) {
+    throw new Invalid3mfError('3MF model exceeds size limit');
+  }
+  const documents = [];
+  for (const model of models) {
+    documents.push({ path: model.fileName, xml: (await readModelEntry(zip, model)).toString('utf8') });
+  }
+  return parse3mfModel(documents);
 }

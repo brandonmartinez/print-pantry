@@ -1,8 +1,9 @@
 import type { FileHandle } from 'node:fs/promises';
 
 const maxMeshBytes = 32 * 1024 * 1024;
-const maxTriangles = 100_000;
-const previewTriangles = 1_500;
+const maxTriangles = 250_000;
+const previewTriangles = 5_000;
+export const interactivePreviewTriangles = 75_000;
 export type Point = [number, number, number];
 export type Triangle = [Point, Point, Point];
 
@@ -15,22 +16,48 @@ function project([x, y, z]: Point): [number, number] {
 
 function render(triangles: Triangle[]): Buffer {
   if (!triangles.length) throw new InvalidMeshError('Mesh has no usable triangles');
-  const projected = triangles.map((triangle) => triangle.map(project));
-  const coordinates = projected.flat();
+  const faces = triangles.map((triangle) => ({
+    triangle,
+    projected: triangle.map(project),
+    depth: triangle.reduce((sum, [x, y, z]) => sum + x + y + z, 0) / 3,
+  })).sort((left, right) => left.depth - right.depth);
+  const coordinates = faces.flatMap((face) => face.projected);
   const bounds = [
     Math.min(...coordinates.map(([x]) => x)), Math.min(...coordinates.map(([, y]) => y)),
     Math.max(...coordinates.map(([x]) => x)), Math.max(...coordinates.map(([, y]) => y)),
   ];
   const span = Math.max(bounds[2] - bounds[0], bounds[3] - bounds[1], 1);
-  const scale = 200 / span;
-  const polygons = projected.map((triangle) =>
-    `<polygon points="${triangle.map(([x, y]) =>
-      `${((x - bounds[0]) * scale + 12).toFixed(2)},${((y - bounds[1]) * scale + 12).toFixed(2)}`).join(' ')}"/>`,
+  const scale = 172 / span;
+  const offsetX = (224 - (bounds[2] - bounds[0]) * scale) / 2;
+  const offsetY = (224 - (bounds[3] - bounds[1]) * scale) / 2;
+  const polygons = faces.map(({ triangle, projected }) => {
+    const [first, second, third] = triangle;
+    const edgeOne = second.map((value, axis) => value - first[axis]);
+    const edgeTwo = third.map((value, axis) => value - first[axis]);
+    const normal = [
+      edgeOne[1] * edgeTwo[2] - edgeOne[2] * edgeTwo[1],
+      edgeOne[2] * edgeTwo[0] - edgeOne[0] * edgeTwo[2],
+      edgeOne[0] * edgeTwo[1] - edgeOne[1] * edgeTwo[0],
+    ];
+    const normalLength = Math.hypot(...normal) || 1;
+    const diffuse = Math.abs((normal[0] * .32 - normal[1] * .42 + normal[2] * .85) / normalLength);
+    const intensity = .62 + diffuse * .38;
+    const color = [112, 145, 118].map((channel) => Math.min(255, Math.round(channel * intensity)));
+    const fill = `rgb(${color.join(' ')})`;
+    const points = projected.map(([x, y]) =>
+      `${((x - bounds[0]) * scale + offsetX).toFixed(2)},${((y - bounds[1]) * scale + offsetY).toFixed(2)}`).join(' ');
+    return `<polygon points="${points}" fill="${fill}" stroke="${fill}" stroke-width=".35" stroke-linejoin="round"/>`;
+  },
   ).join('');
-  return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 224 224" role="img" aria-label="Generated mesh preview"><rect width="224" height="224" fill="#f1f0ea"/><g fill="#c9d9c8" stroke="#526b58" stroke-width=".65" stroke-linejoin="round">${polygons}</g></svg>`);
+  const shadowY = Math.min(211, (bounds[3] - bounds[1]) * scale + offsetY + 3);
+  return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="224" height="224" viewBox="0 0 224 224" role="img" aria-label="Generated mesh preview"><rect width="224" height="224" fill="#f1f2ec"/><ellipse cx="112" cy="${shadowY.toFixed(2)}" rx="68" ry="7" fill="#34483c" opacity=".14"/>${polygons}</svg>`);
 }
 
-export async function readStlTriangles(file: FileHandle, size: number): Promise<Triangle[]> {
+export async function readStlTriangles(
+  file: FileHandle,
+  size: number,
+  triangleLimit = previewTriangles,
+): Promise<Triangle[]> {
   if (size < 84 || size > maxMeshBytes) throw new InvalidMeshError('Mesh is too large or incomplete for preview');
   const header = Buffer.alloc(84);
   const read = await file.read(header, 0, 84, 0);
@@ -39,7 +66,7 @@ export async function readStlTriangles(file: FileHandle, size: number): Promise<
   const binary = count > 0 && count <= maxTriangles && 84 + count * 50 === size;
   const triangles: Triangle[] = [];
   if (binary) {
-    const stride = Math.max(1, Math.ceil(count / previewTriangles));
+    const stride = Math.max(1, Math.ceil(count / triangleLimit));
     const record = Buffer.alloc(50);
     for (let index = 0; index < count; index += stride) {
       const result = await file.read(record, 0, 50, 84 + index * 50);
@@ -67,10 +94,10 @@ export async function readStlTriangles(file: FileHandle, size: number): Promise<
         count++;
         if (count > maxTriangles) throw new InvalidMeshError('Mesh has too many triangles');
         if (vertices.flat().every((coordinate) => Number.isFinite(coordinate) && Math.abs(coordinate) <= 1e9) &&
-          count <= previewTriangles) triangles.push([...vertices] as Triangle);
-        else if (count % Math.ceil(count / previewTriangles) === 0) {
+          count <= triangleLimit) triangles.push([...vertices] as Triangle);
+        else if (count % Math.ceil(count / triangleLimit) === 0) {
           if (vertices.flat().every((coordinate) => Number.isFinite(coordinate) && Math.abs(coordinate) <= 1e9)) {
-            triangles[count % previewTriangles] = [...vertices] as Triangle;
+            triangles[count % triangleLimit] = [...vertices] as Triangle;
           }
         }
         vertices.length = 0;
