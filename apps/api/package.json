@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run src --no-file-parallelism",
-    "account:create": "node dist/provision.js"
+    "account:create": "node dist/provision.js",
+    "account:seed-dev": "tsx src/seed-dev.ts"
   },
   "dependencies": {
     "@print-pantry/contracts": "0.1.0",

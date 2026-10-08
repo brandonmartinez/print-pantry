@@ -25,7 +25,7 @@ and `packages/indexer`.
 
 | Command | Purpose |
 | --- | --- |
-| `npm run dev` | Build shared packages first, then watch shared outputs and the API/web |
+| `npm run dev` | Build shared packages, migrate the database, then watch shared outputs and the API/web |
 | `npm run build` | Build shared packages, API, then web |
 | `npm run typecheck` | Build shared declarations first, then type-check all workspaces |
 | `npm run lint` | Lint workspace code |
@@ -36,12 +36,13 @@ and `packages/indexer`.
 
 Migrations live in `packages/db/drizzle/`, including Drizzle's version journal.
 Commit generated SQL and journal together; inspect SQL before applying it. The
-API does **not** migrate on request. The development container migrates at
-startup; CI exercises migrations against `print_pantry_test`. For host-only
+API does **not** migrate on request. `npm run dev` applies pending migrations
+before starting the API and web processes; CI exercises migrations against
+`print_pantry_test`. For host-only
 development, provide your own isolated PostgreSQL, set `DATABASE_URL`,
 `TEST_DATABASE_URL` (the latter must point to `print_pantry_test`), and
 `LIBRARY_ROOT` to an **unrelated synthetic/test directory**, then run
-`npm run build && npm run db:migrate && npm test && npm run dev`. Never target
+`npm run build && npm test && npm run dev`. Never target
 an external or production database with the test URL.
 
 The shared packages export compiled `dist` files. Root `typecheck` deliberately
@@ -84,8 +85,13 @@ Boundary overrides and metadata edits require the operator role; changing a
 boundary takes effect on the next rescan. Scanning never moves, renames, or
 deletes library files.
 
-Run migrations first, then provision the first account **interactively**
-from inside the running container:
+In the local Compose environment, `npm run dev` creates an initial operator
+account only when the `print_pantry_dev` database has no users. Sign in with
+`admin` / `print-pantry-dev`; change this password for any shared environment.
+The seed is enabled only in `compose.dev.yml` and refuses non-local databases.
+
+For other environments, run migrations first, then provision the first account
+**interactively** from inside the running container:
 
 ```sh
 docker compose -f compose.dev.yml exec app npm run account:create -w @print-pantry/api -- operator operator
@@ -94,7 +100,8 @@ docker compose -f compose.dev.yml exec app npm run account:create -w @print-pant
 The first account must be an operator; create requesters with the same command
 and `requester` as the second argument. A password prompt requires an
 interactive terminal and does not echo or accept passwords as command-line
-arguments. There is no public registration or default account. Sessions use
+arguments. There is no public registration or default account outside local
+development. Sessions use
 HttpOnly SameSite cookies and expire after 14 days. Set `COOKIE_SECURE=true`
 when deploying behind private HTTPS (the development container uses HTTP).
 Do not publish the app directly to the internet.

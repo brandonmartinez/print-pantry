@@ -13,4 +13,4 @@ RUN chmod 755 /usr/local/bin/pantry-entrypoint
 WORKDIR /workspace
 EXPOSE 22 3000 5173
 ENTRYPOINT ["pantry-entrypoint"]
-CMD ["sh", "-c", "npm ci && npm run build && npm run db:migrate && exec npm run dev"]
+CMD ["sleep", "infinity"]

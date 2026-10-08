@@ -7,7 +7,7 @@
   "engines": { "node": "24.13.1" },
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
-    "dev": "npm run build -w @print-pantry/contracts -w @print-pantry/db -w @print-pantry/indexer && concurrently -k -n contracts,db,indexer,api,web \"npm run watch -w @print-pantry/contracts\" \"npm run watch -w @print-pantry/db\" \"npm run watch -w @print-pantry/indexer\" \"npm run dev -w @print-pantry/api\" \"npm run dev -w @print-pantry/web\"",
+    "dev": "npm run build -w @print-pantry/contracts -w @print-pantry/db -w @print-pantry/indexer && npm run db:migrate && npm run account:seed-dev -w @print-pantry/api && concurrently -k -n contracts,db,indexer,api,web \"npm run watch -w @print-pantry/contracts\" \"npm run watch -w @print-pantry/db\" \"npm run watch -w @print-pantry/indexer\" \"npm run dev -w @print-pantry/api\" \"npm run dev -w @print-pantry/web\"",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run build -w @print-pantry/contracts -w @print-pantry/db -w @print-pantry/indexer && npm run typecheck --workspaces --if-present",
     "lint": "eslint .",

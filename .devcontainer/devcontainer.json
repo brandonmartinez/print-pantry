@@ -4,7 +4,8 @@
   "service": "app",
   "workspaceFolder": "/workspace",
   "remoteUser": "node",
-  "overrideCommand": false,
+  "overrideCommand": true,
+  "postCreateCommand": "npm ci",
   "forwardPorts": [5173, 3000],
   "portsAttributes": {
     "5173": { "label": "Print Pantry web" },
