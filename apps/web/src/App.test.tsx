@@ -66,6 +66,20 @@ const detail = {
       downloadUrl: null,
       previewUrl: null,
     },
+    {
+      id: 'asset-readme',
+      versionId: 'version-readme',
+      name: 'README.md',
+      relativePath: 'README.md',
+      variant: null,
+      fileType: 'document',
+      extension: '.md',
+      size: 512,
+      available: true,
+      clientPath: '/print-library/Home/Desk Organizer/README.md',
+      downloadUrl: '/api/catalog/assets/asset-readme/download',
+      previewUrl: null,
+    },
   ],
 };
 const scan = { state: 'idle', lastSuccessfulAt: '2026-10-01T10:00:00.000Z', lastError: null };
@@ -153,7 +167,7 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
       if (selectedCategory || selectedFileType) return jsonResponse(listResponse(1, [project], 1));
       return jsonResponse(listResponse(1, [project, { ...project, id: 'vase', name: 'Ceramic Vase' }], 13));
     }
-    if (path === '/api/catalog/assets/asset-2/geometry') {
+    if (path.startsWith('/api/catalog/assets/asset-2/geometry')) {
       return jsonResponse({
         triangles: [[[0, 0, 0], [1, 0, 0], [0, 1, 0]]],
         sampled: true,
@@ -184,19 +198,24 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
   return { calls, fetchMock };
 }
 
-async function signIn(role: 'operator' | 'requester' = 'requester', options: { sourceUnavailable?: boolean } = {}) {
+async function signIn(
+  role: 'operator' | 'requester' = 'requester',
+  options: { sourceUnavailable?: boolean } = {},
+  landingHeading = 'Browse projects',
+) {
   const api = mockApi(role, options);
   render(<App />);
   await screen.findByRole('heading', { name: 'Welcome to the pantry' });
   fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'maker' } });
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pantry-pass' } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-  await screen.findByRole('heading', { name: 'Browse projects' });
+  await screen.findByRole('heading', { name: landingHeading });
   return api;
 }
 
 afterEach(() => {
   cleanup();
+  window.history.replaceState({}, '', '/');
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -212,7 +231,7 @@ it('signs in and shows the authenticated image-first catalog', async () => {
   expect(initialQuery.has('fileType')).toBe(false);
 });
 
-it('searches, filters by category and file type, and paginates', async () => {
+it('searches, filters, and appends more projects without replacing the grid', async () => {
   const { calls } = await signIn();
   fireEvent.change(screen.getByRole('textbox', { name: 'Search projects' }), { target: { value: 'basket' } });
   fireEvent.click(screen.getByRole('button', { name: 'Search' }));
@@ -226,9 +245,11 @@ it('searches, filters by category and file type, and paginates', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
   expect(await screen.findByRole('button', { name: 'Open Desk Organizer' })).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
   expect(await screen.findByRole('button', { name: 'Open Reading Lamp' })).toBeTruthy();
-  expect(screen.getByRole('navigation', { name: 'Project pages' }).textContent?.replace(/\s+/g, ' ')).toContain('Page 2 of 2');
+  expect(screen.getByRole('button', { name: 'Open Desk Organizer' })).toBeTruthy();
+  expect(screen.getByText('All 13 projects loaded')).toBeTruthy();
+  expect(screen.queryByRole('navigation', { name: 'Project pages' })).toBeNull();
   expect(calls.some(({ path }) => new URL(path, 'http://localhost').searchParams.get('page') === '2')).toBe(true);
 });
 
@@ -236,15 +257,32 @@ it('shows a naturally ordered project detail with file paths and download action
   await signIn();
   fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
   expect(await screen.findByRole('heading', { name: 'Desk Organizer' })).toBeTruthy();
-  const fileList = screen.getByRole('list');
-  const fileTexts = within(fileList).getAllByText(/^Parts\/part-/).map((element) => element.textContent);
+  const requestSection = screen.getByRole('region', { name: 'Request this print' });
+  const fileTexts = within(requestSection).getAllByText(/^Parts\/part-/).map((element) => element.textContent);
   expect(fileTexts).toEqual(['Parts/part-2.stl', 'Parts/part-10.stl']);
-  expect(screen.getAllByRole('link', { name: 'Download' })[0].getAttribute('href')).toBe('/api/catalog/assets/asset-2/download');
-  expect(screen.getByText('Source unavailable')).toBeTruthy();
+  expect(within(requestSection).getAllByRole('link', { name: 'Download' })[0].getAttribute('href')).toBe('/api/catalog/assets/asset-2/download');
+  const otherFilesSection = screen.getByRole('region', { name: 'Other Files' });
+  expect(within(otherFilesSection).getAllByText('README.md')).toHaveLength(2);
+  expect(screen.queryByRole('checkbox', { name: /README\.md/ })).toBeNull();
+  expect(within(requestSection).getByText(/Source unavailable/)).toBeTruthy();
   expect(screen.getByText('Pantry Studio')).toBeTruthy();
 });
 
-it('loads mesh geometry only on demand and supports keyboard and pointer rotation', async () => {
+it('supports direct project links and browser history navigation', async () => {
+  window.history.replaceState({}, '', '/projects/desk-organizer');
+  await signIn('requester', {}, 'Desk Organizer');
+  expect(await screen.findByRole('heading', { name: 'Desk Organizer' })).toBeTruthy();
+  expect(window.location.pathname).toBe('/projects/desk-organizer');
+
+  fireEvent.click(screen.getByRole('link', { name: 'Library' }));
+  expect(await screen.findByRole('heading', { name: 'Browse projects' })).toBeTruthy();
+  expect(window.location.pathname).toBe('/');
+
+  window.history.back();
+  expect(await screen.findByRole('heading', { name: 'Desk Organizer' })).toBeTruthy();
+});
+
+it('loads mesh geometry only on demand and exposes interactive viewer controls', async () => {
   const { calls } = await signIn();
   fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
   await screen.findByRole('heading', { name: 'Desk Organizer' });
@@ -254,18 +292,10 @@ it('loads mesh geometry only on demand and supports keyboard and pointer rotatio
   const exploreButton = await screen.findByRole('button', { name: 'Explore 3D preview for part-2.stl' });
   fireEvent.click(exploreButton);
   const canvas = await screen.findByRole('img', { name: /Interactive 3D preview of part-2\.stl/ });
-  expect(calls.filter(({ path }) => path === '/api/catalog/assets/asset-2/geometry')).toHaveLength(1);
-  expect(screen.getByText(/Drag to rotate, or focus the preview/)).toBeTruthy();
-  expect(canvas.getAttribute('data-rotation-y')).toBe('0.48');
-
-  fireEvent.keyDown(canvas, { key: 'ArrowRight' });
-  expect(canvas.getAttribute('data-rotation-y')).not.toBe('0.48');
-  const keyboardRotation = Number(canvas.getAttribute('data-rotation-y'));
-
-  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 10, clientY: 10 });
-  fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 40, clientY: 30 });
-  expect(Number(canvas.getAttribute('data-rotation-y'))).not.toBe(keyboardRotation);
-  fireEvent.pointerUp(canvas, { pointerId: 1 });
+  expect(calls.filter(({ path }) => path.startsWith('/api/catalog/assets/asset-2/geometry'))).toHaveLength(1);
+  expect(screen.getByText(/Drag to rotate. Scroll or pinch to zoom/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Reset view' })).toBeTruthy();
+  expect(canvas.getAttribute('width')).toBe('720');
 });
 
 it('copies project and file paths when clipboard access succeeds', async () => {
@@ -345,7 +375,7 @@ it('requires explicit file-version selection and submits a bounded print request
 
 it('shows requester history and permits cancellation before printing', async () => {
   const { calls } = await signIn('requester');
-  fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+  fireEvent.click(screen.getByRole('link', { name: 'Requests' }));
   expect(await screen.findByRole('heading', { name: 'Your requests' })).toBeTruthy();
   expect(screen.getByText('Parts/part-2.stl')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Cancel request' }));
@@ -357,7 +387,7 @@ it('shows requester history and permits cancellation before printing', async () 
 
 it('explains unavailable selected sources without exposing internal reason codes', async () => {
   await signIn('requester', { sourceUnavailable: true });
-  fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+  fireEvent.click(screen.getByRole('link', { name: 'Requests' }));
   expect(await screen.findByText('The selected source file is no longer available.')).toBeTruthy();
   expect(screen.getByText('Exact version unavailable')).toBeTruthy();
   expect(screen.queryByText('asset_missing')).toBeNull();
@@ -365,7 +395,7 @@ it('explains unavailable selected sources without exposing internal reason codes
 
 it('loads detail-only request history when its disclosure opens', async () => {
   const { calls } = await signIn('requester');
-  fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+  fireEvent.click(screen.getByRole('link', { name: 'Requests' }));
   await screen.findByRole('heading', { name: 'Your requests' });
   fireEvent.click(screen.getByText('Request history', { selector: 'summary' }));
   expect(await screen.findAllByText('by operator')).toHaveLength(2);
@@ -382,7 +412,7 @@ it('preserves an unsaved queue draft until it is saved', async () => {
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pantry-pass' } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
   await screen.findByRole('heading', { name: 'Browse projects' });
-  fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+  fireEvent.click(screen.getByRole('link', { name: 'Queue' }));
   await screen.findByRole('heading', { name: 'Print queue' });
   fireEvent.click(screen.getByRole('button', { name: 'Move queue-2 earlier' }));
   fireEvent.click(screen.getByRole('button', { name: 'Choose next' }));
@@ -402,7 +432,7 @@ it('refreshes an operator queue after a stale reorder conflict', async () => {
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pantry-pass' } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
   await screen.findByRole('heading', { name: 'Browse projects' });
-  fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+  fireEvent.click(screen.getByRole('link', { name: 'Queue' }));
   expect(await screen.findByRole('heading', { name: 'Print queue' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Move queue-2 earlier' }));
   fireEvent.click(screen.getByRole('button', { name: 'Save queue order' }));

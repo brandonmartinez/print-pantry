@@ -1,4 +1,6 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { BrowserRouter, Link, matchPath, useLocation, useNavigate } from 'react-router-dom';
+import type { MeshGeometry, Point3D, Triangle } from './MeshViewer.js';
 
 type User = { id: string; username: string; role: 'operator' | 'member' | string };
 type Scan = {
@@ -81,9 +83,6 @@ type ProjectFile = {
   previewUrl?: string | null;
   geometryUrl?: string | null;
 };
-type Point3D = [number, number, number];
-type Triangle = [Point3D, Point3D, Point3D];
-type MeshGeometry = { triangles: Triangle[]; sampled: boolean };
 type CatalogResponse = {
   items: Project[];
   total: number;
@@ -98,6 +97,8 @@ type ScanResponse = { scan: Scan };
 
 const pageSize = 12;
 const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+const InteractiveMesh = lazy(() => import('./MeshViewer.js'));
+const requestableFileTypes = new Set(['mesh', 'source', 'print']);
 
 class ApiError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -199,7 +200,7 @@ function isPoint3D(value: unknown): value is Point3D {
 function parseMeshGeometry(value: unknown): MeshGeometry {
   if (!value || typeof value !== 'object') throw new Error('The preview response was invalid.');
   const response = value as { triangles?: unknown; sampled?: unknown };
-  if (!Array.isArray(response.triangles) || response.triangles.length === 0 || response.triangles.length > 1500) {
+  if (!Array.isArray(response.triangles) || response.triangles.length === 0 || response.triangles.length > 75_000) {
     throw new Error('No supported mesh geometry was returned.');
   }
   const triangles: Triangle[] = [];
@@ -212,132 +213,7 @@ function parseMeshGeometry(value: unknown): MeshGeometry {
   return { triangles, sampled: response.sampled === true };
 }
 
-function InteractiveMesh({ fileName, geometry }: { fileName: string; geometry: MeshGeometry }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const dragRef = useRef<{ x: number; y: number } | null>(null);
-  const instructionsId = useId();
-  const [rotation, setRotation] = useState({ x: -0.32, y: 0.48 });
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const context = canvas?.getContext('2d');
-    if (!canvas || !context) return;
-
-    const width = canvas.width;
-    const height = canvas.height;
-    context.clearRect(0, 0, width, height);
-    context.fillStyle = '#f3f4ec';
-    context.fillRect(0, 0, width, height);
-
-    const points = geometry.triangles.flat();
-    const bounds = [0, 1, 2].map((axis) => {
-      const coordinates = points.map((point) => point[axis]);
-      return [Math.min(...coordinates), Math.max(...coordinates)];
-    });
-    const center = bounds.map(([minimum, maximum]) => (minimum + maximum) / 2);
-    const extent = Math.max(...bounds.map(([minimum, maximum]) => maximum - minimum), 1);
-    const scale = Math.min(width, height) * 0.62 / extent;
-    const cosX = Math.cos(rotation.x);
-    const sinX = Math.sin(rotation.x);
-    const cosY = Math.cos(rotation.y);
-    const sinY = Math.sin(rotation.y);
-    const faces = geometry.triangles.map((triangle) => {
-      const projected = triangle.map(([x, y, z]) => {
-        const centeredX = (x - center[0]) * scale;
-        const centeredY = (y - center[1]) * scale;
-        const centeredZ = (z - center[2]) * scale;
-        const rotatedX = centeredX * cosY + centeredZ * sinY;
-        const rotatedZ = -centeredX * sinY + centeredZ * cosY;
-        const rotatedY = centeredY * cosX - rotatedZ * sinX;
-        return {
-          x: width / 2 + rotatedX,
-          y: height / 2 - rotatedY,
-          depth: centeredY * sinX + rotatedZ * cosX,
-        };
-      });
-      return { points: projected, depth: projected.reduce((sum, point) => sum + point.depth, 0) / 3 };
-    }).sort((left, right) => left.depth - right.depth);
-
-    for (const face of faces) {
-      context.beginPath();
-      context.moveTo(face.points[0].x, face.points[0].y);
-      context.lineTo(face.points[1].x, face.points[1].y);
-      context.lineTo(face.points[2].x, face.points[2].y);
-      context.closePath();
-      context.fillStyle = '#709176';
-      context.fill();
-      context.strokeStyle = '#486750';
-      context.lineWidth = 1;
-      context.stroke();
-    }
-  }, [geometry, rotation]);
-
-  function onPointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
-    event.preventDefault();
-    dragRef.current = { x: event.clientX, y: event.clientY };
-    event.currentTarget.focus();
-    if (typeof event.currentTarget.setPointerCapture === 'function') {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    }
-  }
-
-  function onPointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
-    const previous = dragRef.current;
-    if (!previous) return;
-    const deltaX = event.clientX - previous.x;
-    const deltaY = event.clientY - previous.y;
-    dragRef.current = { x: event.clientX, y: event.clientY };
-    setRotation((current) => ({
-      x: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, current.x + deltaY * 0.01)),
-      y: current.y + deltaX * 0.01,
-    }));
-  }
-
-  function onKeyDown(event: React.KeyboardEvent<HTMLCanvasElement>) {
-    const step = 0.12;
-    const directions: Record<string, { x: number; y: number }> = {
-      ArrowLeft: { x: 0, y: -step },
-      ArrowRight: { x: 0, y: step },
-      ArrowUp: { x: -step, y: 0 },
-      ArrowDown: { x: step, y: 0 },
-    };
-    const direction = directions[event.key];
-    if (!direction) return;
-    event.preventDefault();
-    setRotation((current) => ({
-      x: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, current.x + direction.x)),
-      y: current.y + direction.y,
-    }));
-  }
-
-  return (
-    <figure className="mesh-viewer">
-      <canvas
-        aria-describedby={instructionsId}
-        aria-label={`Interactive 3D preview of ${fileName}. Use arrow keys or pointer drag to rotate.`}
-        className="mesh-canvas"
-        data-rotation-x={rotation.x.toFixed(2)}
-        data-rotation-y={rotation.y.toFixed(2)}
-        height={360}
-        onKeyDown={onKeyDown}
-        onPointerCancel={() => { dragRef.current = null; }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={() => { dragRef.current = null; }}
-        role="img"
-        tabIndex={0}
-        ref={canvasRef}
-        width={720}
-      />
-      <figcaption id={instructionsId}>
-        Drag to rotate, or focus the preview and use the arrow keys.
-        {geometry.sampled && <span> This lightweight view uses sampled geometry.</span>}
-      </figcaption>
-    </figure>
-  );
-}
-
-function StlPreview({ file }: { file: ProjectFile }) {
+function MeshPreview({ file }: { file: ProjectFile }) {
   const geometryUrl = safeSameOriginUrl(file.geometryUrl);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -349,7 +225,8 @@ function StlPreview({ file }: { file: ProjectFile }) {
     setLoading(true);
     setError('');
     try {
-      const response = await apiRequest<unknown>(geometryUrl);
+      const separator = geometryUrl.includes('?') ? '&' : '?';
+      const response = await apiRequest<unknown>(`${geometryUrl}${separator}quality=interactive-v3`);
       setGeometry(parseMeshGeometry(response));
     } catch (reason) {
       setError(errorMessage(reason));
@@ -367,7 +244,7 @@ function StlPreview({ file }: { file: ProjectFile }) {
     if (!geometry) void loadGeometry();
   }
 
-  if (file.fileType.toLowerCase() !== 'mesh' || file.extension.toLowerCase() !== '.stl') return null;
+  if (file.fileType.toLowerCase() !== 'mesh' || !['.stl', '.3mf'].includes(file.extension.toLowerCase())) return null;
   if (!geometryUrl) {
     return <span className="mesh-unavailable" role="status">3D preview unavailable</span>;
   }
@@ -390,7 +267,11 @@ function StlPreview({ file }: { file: ProjectFile }) {
           <button className="button button-small button-quiet" onClick={() => void loadGeometry()} type="button">Retry preview</button>
         </div>
       )}
-      {open && geometry && <InteractiveMesh fileName={file.name} geometry={geometry} />}
+      {open && geometry && (
+        <Suspense fallback={<p className="mesh-state" role="status">Starting 3D viewer…</p>}>
+          <InteractiveMesh fileName={file.name} geometry={geometry} />
+        </Suspense>
+      )}
     </div>
   );
 }
@@ -587,7 +468,10 @@ function MetadataEditor({
 }
 
 function RequestForm({ project }: { project: ProjectResponse['project'] }) {
-  const selectableFiles = project.files.filter((file) => file.available && file.versionId);
+  const printFiles = project.files
+    .filter((file) => requestableFileTypes.has(file.fileType.toLowerCase()))
+    .sort((left, right) => naturalCompare.compare(left.relativePath || left.name, right.relativePath || right.name));
+  const selectableFiles = printFiles.filter((file) => file.available && file.versionId);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [quantity, setQuantity] = useState('1');
   const [material, setMaterial] = useState('');
@@ -654,36 +538,55 @@ function RequestForm({ project }: { project: ProjectResponse['project'] }) {
       <div>
         <p className="eyebrow">Ready when you are</p>
         <h2 id="request-heading">Request this print</h2>
-        <p className="quiet">Choose every file and variant needed. Files are never combined automatically.</p>
+        <p className="quiet">Choose the specific 3D files or prepared print files you need.</p>
       </div>
-      {selectableFiles.length === 0 ? (
-        <p className="notice notice-error" role="status">No available file versions can be requested right now.</p>
+      {printFiles.length === 0 ? (
+        <p className="notice notice-error" role="status">No requestable 3D or prepared print files were found.</p>
       ) : (
         <form className="request-form" onSubmit={submit}>
           <fieldset>
-            <legend>Files and variants <span aria-hidden="true">*</span></legend>
-            <p className="field-hint">Select one or more available versions for this request.</p>
+            <legend>3D files and variants <span aria-hidden="true">*</span></legend>
+            <p className="field-hint">Select one or more files. Preview and download controls refer to that exact file.</p>
             <div className="request-file-options">
-              {project.files.map((file) => {
+              {printFiles.map((file) => {
                 const selectable = file.available && Boolean(file.versionId);
                 const selectionLabel = `${file.name}${file.variant ? ` (${file.variant})` : ''}`;
+                const downloadUrl = safeSameOriginUrl(file.downloadUrl);
+                const inputId = `request-file-${file.id}`;
                 return (
-                  <label className={`request-file-option ${selectable ? '' : 'request-file-option-disabled'}`} key={file.id}>
-                    <input
-                      checked={selectedIds.has(file.id)}
-                      disabled={!selectable || busy}
-                      onChange={() => toggleFile(file.id)}
-                      type="checkbox"
-                    />
-                    <span>
-                      <strong>{selectionLabel}</strong>
-                      <small>{file.relativePath} · {selectable ? 'Current version available' : file.available ? 'No requestable version' : 'Source unavailable'}</small>
-                    </span>
-                  </label>
+                  <div className={`request-file-option ${selectable ? '' : 'request-file-option-disabled'}`} key={file.id}>
+                    <div className="request-file-summary">
+                      <input
+                        checked={selectedIds.has(file.id)}
+                        disabled={!selectable || busy}
+                        id={inputId}
+                        onChange={() => toggleFile(file.id)}
+                        type="checkbox"
+                      />
+                      <div className="file-icon" aria-hidden="true">{file.fileType.toUpperCase().slice(0, 4)}</div>
+                      <label htmlFor={inputId}>
+                        <strong>{selectionLabel}</strong>
+                        <small>{file.relativePath}</small>
+                        <small>{file.fileType.toUpperCase()} · {formatSize(file.size)} · {selectable ? 'Current version' : file.available ? 'No requestable version' : 'Source unavailable'}</small>
+                      </label>
+                      {file.available && (
+                        <div className="request-file-actions">
+                          <LocalPathControl label="file" path={file.clientPath} />
+                          {downloadUrl
+                            ? <a className="button button-small button-primary" href={downloadUrl} download>Download</a>
+                            : <span className="quiet file-no-download">Download unavailable</span>}
+                        </div>
+                      )}
+                    </div>
+                    {file.available && <MeshPreview file={file} />}
+                  </div>
                 );
               })}
             </div>
           </fieldset>
+          {selectableFiles.length === 0 && (
+            <p className="notice notice-error" role="status">No current file versions can be requested right now.</p>
+          )}
           <div className="request-fields">
             <label>Quantity <input aria-describedby="quantity-hint" inputMode="numeric" max={100} min={1} onChange={(event) => setQuantity(event.target.value)} required step={1} type="number" value={quantity} /></label>
             <p className="field-hint" id="quantity-hint">Whole number from 1 to 100.</p>
@@ -692,7 +595,7 @@ function RequestForm({ project }: { project: ProjectResponse['project'] }) {
             <label className="request-notes">Notes <textarea maxLength={2000} onChange={(event) => setNotes(event.target.value)} placeholder="Optional fit, finish, or timing details" rows={3} value={notes} /></label>
           </div>
           {(error || message) && <p className={`notice ${error ? 'notice-error' : 'notice-success'}`} role={error ? 'alert' : 'status'}>{error || message}</p>}
-          <button className="button button-primary" disabled={busy} type="submit">{busy ? 'Submitting…' : 'Submit print request'}</button>
+          <button className="button button-primary" disabled={busy || selectableFiles.length === 0} type="submit">{busy ? 'Submitting…' : 'Submit print request'}</button>
         </form>
       )}
     </section>
@@ -1081,6 +984,7 @@ function ProjectDetail({
   const previewUrl = safeSameOriginUrl(project.previewUrl);
   const files = [...(project.files || [])].sort((left, right) =>
     naturalCompare.compare(left.relativePath || left.name, right.relativePath || right.name));
+  const otherFiles = files.filter((file) => !requestableFileTypes.has(file.fileType.toLowerCase()));
   const sourceUrl = project.sourceUrl && /^https?:\/\//i.test(project.sourceUrl) ? project.sourceUrl : undefined;
 
   return (
@@ -1120,15 +1024,13 @@ function ProjectDetail({
               : <div className="image-placeholder detail-placeholder"><span aria-hidden="true">✳</span><small>No preview image available</small></div>}
           </div>
           <RequestForm project={project} />
-          <section className="files-section" aria-labelledby="files-heading">
+          {otherFiles.length > 0 && <section className="files-section" aria-labelledby="files-heading">
             <div className="section-heading">
-              <div><p className="eyebrow">The project</p><h2 id="files-heading">Files &amp; variants</h2></div>
-              <span className="quiet">{files.length} {files.length === 1 ? 'file' : 'files'}</span>
+              <div><p className="eyebrow">Reference material</p><h2 id="files-heading">Other Files</h2></div>
+              <span className="quiet">{otherFiles.length} {otherFiles.length === 1 ? 'file' : 'files'}</span>
             </div>
-            {files.length === 0
-              ? <p className="empty-note">No associated files were found for this project.</p>
-              : <ul className="file-list">
-                {files.map((file) => {
+            <ul className="file-list">
+                {otherFiles.map((file) => {
                   const downloadUrl = safeSameOriginUrl(file.downloadUrl);
                   return (
                     <li className={`file-row ${file.available ? '' : 'file-row-unavailable'}`} key={file.id}>
@@ -1144,14 +1046,13 @@ function ProjectDetail({
                           {downloadUrl
                             ? <a className="button button-small button-primary" href={downloadUrl} download>Download</a>
                             : <span className="quiet file-no-download">Download unavailable</span>}
-                          <StlPreview file={file} />
                         </div>
                         : <span className="unavailable-label">Source unavailable</span>}
                     </li>
                   );
                 })}
-              </ul>}
-          </section>
+              </ul>
+          </section>}
         </div>
         <aside className="detail-aside" aria-label="Project information">
           <section className="info-card">
@@ -1183,7 +1084,12 @@ function ProjectDetail({
   );
 }
 
-function App() {
+function RoutedApp() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const projectMatch = matchPath('/projects/:projectId', location.pathname);
+  const selectedProjectId = projectMatch?.params.projectId ?? null;
+  const activeView = location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
@@ -1197,13 +1103,12 @@ function App() {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState('');
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<'library' | 'requests'>('library');
   const [scan, setScan] = useState<Scan>();
   const [rescanBusy, setRescanBusy] = useState(false);
   const [rescanError, setRescanError] = useState('');
   const [rescanMessage, setRescanMessage] = useState('');
   const [catalogRefresh, setCatalogRefresh] = useState(0);
+  const catalogEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1224,6 +1129,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const knownPath = location.pathname === '/' || location.pathname === '/requests' || location.pathname === '/queue'
+      || Boolean(projectMatch);
+    if (!knownPath) navigate('/', { replace: true });
+  }, [location.pathname, navigate, projectMatch]);
+
+  useEffect(() => {
     if (!user || selectedProjectId || activeView !== 'library') return;
     const controller = new AbortController();
     const params = new URLSearchParams({
@@ -1237,7 +1148,14 @@ function App() {
     setCatalogError('');
     apiRequest<CatalogResponse>(`/api/catalog/projects?${params}`, { signal: controller.signal })
       .then((result) => {
-        setCatalog(result);
+        setCatalog((current) => {
+          if (page === 1 || !current) return result;
+          const existingIds = new Set(current.items.map((project) => project.id));
+          return {
+            ...result,
+            items: [...current.items, ...result.items.filter((project) => !existingIds.has(project.id))],
+          };
+        });
         setScan(result.scan);
         setConnectionError('');
       })
@@ -1256,6 +1174,20 @@ function App() {
     () => Math.max(1, Math.ceil((catalog?.total || 0) / pageSize)),
     [catalog?.total],
   );
+
+  useEffect(() => {
+    const target = catalogEndRef.current;
+    if (!target || !user || selectedProjectId || activeView !== 'library' || catalogLoading
+      || page >= totalPages || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        observer.disconnect();
+        setPage((current) => Math.min(totalPages, current + 1));
+      }
+    }, { rootMargin: '500px 0px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [activeView, catalogLoading, page, selectedProjectId, totalPages, user]);
 
   async function login(username: string, password: string) {
     setAuthBusy(true);
@@ -1281,8 +1213,7 @@ function App() {
       await apiRequest('/api/auth/logout', { method: 'POST' });
       setUser(null);
       setCatalog(null);
-      setSelectedProjectId(null);
-      setActiveView('library');
+      navigate('/');
     } catch (reason) {
       setAuthError(`Could not sign out: ${errorMessage(reason)}`);
     } finally {
@@ -1298,6 +1229,7 @@ function App() {
       const result = await apiRequest<ScanResponse>('/api/catalog/rescan', { method: 'POST' });
       setScan(result.scan);
       setRescanMessage('Library rescan started.');
+      setPage(1);
       setCatalogRefresh((value) => value + 1);
     } catch (reason) {
       setRescanError(errorMessage(reason));
@@ -1322,13 +1254,13 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="/" onClick={(event) => { event.preventDefault(); setActiveView('library'); setSelectedProjectId(null); }} aria-label="Print Pantry home">
+        <Link className="brand" to="/" aria-label="Print Pantry home">
           <span className="brand-mark" aria-hidden="true">P</span>
           <span>Print Pantry</span>
-        </a>
+        </Link>
         <nav className="topbar-nav" aria-label="Main navigation">
-          <button className={activeView === 'library' ? 'nav-link active' : 'nav-link'} onClick={() => { setActiveView('library'); setSelectedProjectId(null); }} type="button">Library</button>
-          <button className={activeView === 'requests' ? 'nav-link active' : 'nav-link'} onClick={() => { setActiveView('requests'); setSelectedProjectId(null); }} type="button">{user.role === 'operator' ? 'Queue' : 'Requests'}</button>
+          <Link className={activeView === 'library' ? 'nav-link active' : 'nav-link'} to="/">Library</Link>
+          <Link className={activeView === 'requests' ? 'nav-link active' : 'nav-link'} to={user.role === 'operator' ? '/queue' : '/requests'}>{user.role === 'operator' ? 'Queue' : 'Requests'}</Link>
         </nav>
         <div className="account-menu">
           <span className="user-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
@@ -1348,7 +1280,7 @@ function App() {
             projectId={selectedProjectId}
             user={user}
             scan={scan}
-            onBack={() => { setActiveView('library'); setSelectedProjectId(null); }}
+            onBack={() => navigate('/')}
           />
         </main>
         : <main className="content-wrap" id="projects">
@@ -1432,7 +1364,7 @@ function App() {
                 <button className="button button-outline" onClick={() => setCatalogRefresh((value) => value + 1)} type="button">Try again</button>
               </div>
             )}
-            {catalogLoading && !catalogError && (
+            {catalogLoading && !catalogError && !catalog && (
               <div className="catalog-state" aria-live="polite"><span className="spinner" /><p>Gathering your projects…</p></div>
             )}
             {!catalogLoading && !catalogError && catalog && catalog.items.length === 0 && (
@@ -1443,18 +1375,21 @@ function App() {
                 {(searchTerm || category || fileType) && <button className="button button-outline" onClick={() => { setSearchText(''); setSearchTerm(''); setCategory(''); setFileType(''); setPage(1); }} type="button">Clear filters</button>}
               </div>
             )}
-            {!catalogLoading && !catalogError && catalog && catalog.items.length > 0 && (
+            {!catalogError && catalog && catalog.items.length > 0 && (
               <>
                 <div className="project-grid">
                   {catalog.items.map((project) => (
-                    <ProjectCard key={project.id} project={project} onOpen={() => setSelectedProjectId(project.id)} />
+                    <ProjectCard key={project.id} project={project} onOpen={() => navigate(`/projects/${project.id}`)} />
                   ))}
                 </div>
-                <nav className="pagination" aria-label="Project pages">
-                  <button className="button button-quiet" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} type="button">← Previous</button>
-                  <span>Page <strong>{catalog.page || page}</strong> of <strong>{totalPages}</strong></span>
-                  <button className="button button-quiet" disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))} type="button">Next →</button>
-                </nav>
+                <div className="catalog-load-more" ref={catalogEndRef}>
+                  {catalogLoading
+                    ? <><span className="spinner" /><span role="status">Loading more projects…</span></>
+                    : page < totalPages
+                    ? <button className="button button-outline" onClick={() => setPage((value) => Math.min(totalPages, value + 1))} type="button">Load more</button>
+                    : <span>All {catalog.total} projects loaded</span>}
+                  <small>{catalog.items.length} of {catalog.total}</small>
+                </div>
               </>
             )}
           </section>
@@ -1462,6 +1397,10 @@ function App() {
         </main>}
     </div>
   );
+}
+
+function App() {
+  return <BrowserRouter><RoutedApp /></BrowserRouter>;
 }
 
 export { App };

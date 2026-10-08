@@ -49,7 +49,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   text-transform: uppercase;
 }
 
-.app-shell { min-height: 100vh; }
+.app-shell { min-height: 100vh; overflow-x: clip; }
 .topbar {
   display: flex;
   align-items: center;
@@ -314,8 +314,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .tag { display: inline-flex; max-width: 100%; align-items: center; padding: .28rem .55rem; overflow: hidden; border-radius: 2rem; background: #f0f2ec; color: #5c705d; font-size: .68rem; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .tag-list { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .6rem; }
 
-.pagination { display: flex; align-items: center; justify-content: center; gap: 1.15rem; margin-top: 2.4rem; color: #777f75; font-size: .78rem; }
-.pagination strong { color: #39453c; }
+.catalog-load-more { display: flex; min-height: 88px; align-items: center; justify-content: center; flex-direction: column; gap: .55rem; margin-top: 1.25rem; color: #777f75; font-size: .78rem; }
+.catalog-load-more small { color: #91978f; font-size: .68rem; }
 .catalog-state, .detail-state { display: flex; min-height: 230px; align-items: center; justify-content: center; flex-direction: column; padding: 2rem; text-align: center; }
 .catalog-state h3 { margin: .6rem 0 .25rem; font-family: var(--serif); font-size: 1.35rem; font-weight: 500; }
 .catalog-state p { max-width: 420px; margin: .2rem 0 .8rem; color: var(--muted); font-size: .86rem; line-height: 1.55; }
@@ -376,20 +376,20 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .field-hint { margin: .3rem 0 .65rem; color: #768073; font-size: .72rem; line-height: 1.4; }
 .request-file-options { display: grid; gap: .45rem; }
 .request-file-option {
-  display: flex;
-  align-items: flex-start;
-  gap: .65rem;
   padding: .7rem .75rem;
   border: 1px solid #dfe4dc;
   border-radius: 8px;
   background: #fff;
-  cursor: pointer;
 }
-.request-file-option input { width: 1rem; height: 1rem; margin: .13rem 0 0; accent-color: var(--green); }
-.request-file-option span { display: flex; min-width: 0; flex-direction: column; gap: .16rem; }
-.request-file-option strong { overflow-wrap: anywhere; color: #37443a; font-size: .78rem; }
-.request-file-option small { color: #768073; font-size: .68rem; line-height: 1.35; overflow-wrap: anywhere; }
-.request-file-option-disabled { cursor: not-allowed; opacity: .58; }
+.request-file-summary { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: .65rem; }
+.request-file-summary > input { width: 1rem; height: 1rem; margin: 0; accent-color: var(--green); }
+.request-file-summary > label { display: flex; min-width: 0; flex-direction: column; gap: .16rem; cursor: pointer; }
+.request-file-summary strong { overflow-wrap: anywhere; color: #37443a; font-size: .78rem; }
+.request-file-summary small { overflow-wrap: anywhere; color: #768073; font-size: .68rem; line-height: 1.35; }
+.request-file-actions { display: flex; min-width: 0; align-items: center; justify-content: end; flex-wrap: wrap; gap: .35rem; }
+.request-file-actions .path-control { display: contents; }
+.request-file-actions .path-feedback, .request-file-actions .fallback-path { flex-basis: 100%; max-width: 280px; }
+.request-file-option-disabled { opacity: .58; }
 .request-fields {
   display: grid;
   grid-template-columns: minmax(0, .6fr) 1fr 1fr;
@@ -545,13 +545,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .file-actions .fallback-path input { margin-top: .3rem; }
 .file-no-download { font-size: .68rem; }
 .unavailable-label { color: #9a533d; font-size: .73rem; font-weight: 600; white-space: nowrap; }
-.mesh-preview-control { display: flex; min-width: 0; flex: 0 0 auto; align-items: start; flex-direction: column; gap: .4rem; }
-.mesh-preview-open { flex-basis: 100%; }
+.mesh-preview-control { display: flex; width: 100%; min-width: 0; align-items: start; flex-direction: column; gap: .4rem; margin-top: .65rem; padding-top: .65rem; border-top: 1px solid #edf0e9; }
+.mesh-preview-open { display: block; }
 .mesh-unavailable { color: #858b81; font-size: .68rem; }
 .mesh-state { margin: .2rem 0; color: #6f7d6d; font-size: .75rem; }
 .mesh-error { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
 .mesh-error p { margin: .2rem 0; color: #8e4c36; font-size: .75rem; }
-.mesh-viewer { width: min(100%, 720px); margin: .25rem 0 .15rem; }
+.mesh-viewer { width: 100%; margin: .65rem 0 .15rem; }
 .mesh-canvas {
   display: block;
   width: 100%;
@@ -564,7 +564,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   touch-action: none;
 }
 .mesh-canvas:active { cursor: grabbing; }
-.mesh-viewer figcaption { margin-top: .35rem; color: #778174; font-size: .68rem; line-height: 1.4; }
+.mesh-viewer-footer { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-top: .4rem; }
+.mesh-viewer figcaption { color: #778174; font-size: .68rem; line-height: 1.4; }
+.mesh-reset { flex: 0 0 auto; padding: .2rem 0; border: 0; background: transparent; color: var(--green); cursor: pointer; font-size: .68rem; font-weight: 600; }
+.mesh-reset:hover { text-decoration: underline; }
 .detail-aside { display: flex; flex-direction: column; gap: .85rem; }
 .info-card { padding: 1.05rem; border: 1px solid #e7e8e0; border-radius: 11px; background: #fff; }
 .info-card h2 { margin: 0; font-family: var(--serif); font-size: 1.15rem; font-weight: 500; }
@@ -629,6 +632,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .file-copy { flex-basis: calc(100% - 58px); }
   .file-actions { width: 100%; padding-left: 3.2rem; }
   .file-actions .fallback-path { margin-top: .25rem; }
+  .request-file-summary { grid-template-columns: auto auto minmax(0, 1fr); align-items: start; }
+  .request-file-actions { grid-column: 2 / -1; justify-content: start; }
 }
 
 @media (max-width: 480px) {
@@ -647,8 +652,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .project-category { font-size: .58rem; }
   .project-name { white-space: normal; }
   .project-card-foot { align-items: start; flex-direction: column; }
-  .pagination { gap: .35rem; justify-content: space-between; }
-  .pagination .button { padding-inline: .55rem; font-size: .72rem; }
   .app-footer { gap: 1rem; font-size: .62rem; }
   .login-card { padding: 1.5rem; }
   .metadata-form { grid-template-columns: 1fr; padding: .9rem; }
