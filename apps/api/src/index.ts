@@ -3,6 +3,9 @@ import { createLibraryIndexer, read3mfGeometryFromHandle, read3mfThumbnailFromHa
 import { clientPath } from './files.js';
 import { productionOrigin } from './production-config.js';
 import { buildServer } from './server.js';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { validateStorage } from './import-storage.js';
 
 const pool = createPool(process.env.DATABASE_URL ?? '');
 const root = process.env.LIBRARY_ROOT;
@@ -29,6 +32,14 @@ for (const name of ignoredDirectoryNames) {
   }
 }
 if (process.env.CLIENT_MOUNT_PREFIX) clientPath(process.env.CLIENT_MOUNT_PREFIX, 'configuration-check');
+if (process.env.MANAGED_CLIENT_MOUNT_PREFIX) clientPath(process.env.MANAGED_CLIENT_MOUNT_PREFIX, 'configuration-check');
+const developmentStorage = process.env.NODE_ENV === 'production' ? undefined :
+  fileURLToPath(new URL('../../../.pantry-data/', import.meta.url));
+const intakeRoot = process.env.IMPORT_STORAGE_ROOT || (developmentStorage && join(developmentStorage, 'intake'));
+const managedRoot = process.env.MANAGED_LIBRARY_ROOT || (developmentStorage && join(developmentStorage, 'library'));
+if (!!intakeRoot !== !!managedRoot) throw new Error('IMPORT_STORAGE_ROOT and MANAGED_LIBRARY_ROOT must be configured together');
+const importStorage = intakeRoot && managedRoot ? { intakeRoot, managedRoot } : undefined;
+if (importStorage) await validateStorage(importStorage, root);
 const indexer = createLibraryIndexer({
   db: createDatabase(pool), root, ignoredDirectoryNames,
   hashConcurrency: 2, allowEmptyLibrary: allowEmptyLibrary === 'true',
@@ -37,6 +48,8 @@ const server = buildServer(pool, {
   pool, root, clientMountPrefix: process.env.CLIENT_MOUNT_PREFIX,
   indexer, read3mfGeometry: read3mfGeometryFromHandle,
   read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: cookieSecure === 'true',
+  managedRoot, managedClientMountPrefix: process.env.MANAGED_CLIENT_MOUNT_PREFIX,
+  importStorage,
 }, publicOrigin);
 const port = Number(process.env.API_PORT ?? 3000);
 

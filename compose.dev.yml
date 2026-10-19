@@ -15,6 +15,9 @@ services:
       API_PORT: "3000"
       WEB_PORT: "5173"
       LIBRARY_ROOT: /mnt/library
+      IMPORT_STORAGE_ROOT: /workspace/.pantry-data/intake
+      MANAGED_LIBRARY_ROOT: /workspace/.pantry-data/library
+      MANAGED_CLIENT_MOUNT_PREFIX: ${MANAGED_CLIENT_MOUNT_PREFIX:-}
       LIBRARY_IGNORED_DIRS: ${LIBRARY_IGNORED_DIRS:-}
       LIBRARY_ALLOW_EMPTY: ${LIBRARY_ALLOW_EMPTY:-false}
       CLIENT_MOUNT_PREFIX: ${CLIENT_MOUNT_PREFIX:-}

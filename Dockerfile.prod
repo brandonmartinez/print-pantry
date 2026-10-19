@@ -49,6 +49,8 @@ COPY --from=build --chown=node:node /workspace/packages/db/drizzle ./packages/db
 COPY --from=build --chown=node:node /workspace/packages/indexer/dist ./packages/indexer/dist
 COPY --from=build --chown=node:node /workspace/apps/api/dist ./apps/api/dist
 COPY --chown=node:node deploy/entrypoint.sh ./deploy/entrypoint.sh
+RUN mkdir -p /var/lib/print-pantry/imports /var/lib/print-pantry/managed \
+    && chown node:node /var/lib/print-pantry /var/lib/print-pantry/imports /var/lib/print-pantry/managed
 USER node
 EXPOSE 3000
 ENTRYPOINT ["sh", "deploy/entrypoint.sh"]

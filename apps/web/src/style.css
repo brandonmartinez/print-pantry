@@ -510,6 +510,40 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .request-history ol { display: flex; flex-direction: column; gap: .4rem; margin: .6rem 0 0; padding-left: 1.2rem; }
 .request-history p { margin: .15rem 0 0; }
 .requests-state { display: flex; min-height: 310px; align-items: center; justify-content: center; flex-direction: column; gap: .8rem; padding: 2rem; text-align: center; }
+.import-add { margin-bottom: 1rem; }
+.import-form { display: grid; gap: .85rem; max-width: 720px; margin-bottom: 1rem; }
+.import-form label, .import-card .operator-note { display: flex; flex-direction: column; gap: .4rem; color: #526156; font-size: .82rem; }
+.import-form input, .import-form textarea, .import-card textarea { width: 100%; min-width: 0; padding: .7rem; border: 1px solid #d4dbd1; border-radius: 7px; background: #fff; color: var(--ink); }
+.import-form textarea, .import-card textarea { resize: vertical; }
+.import-form > button { justify-self: start; }
+.import-match { padding-top: .5rem; border-top: 1px solid var(--line); font-size: .86rem; line-height: 1.6; }
+.import-match h3 { margin-bottom: .6rem; }
+.import-existing { display: flex; align-items: start; gap: .5rem; margin: 1rem 0; }
+.import-existing input { flex-shrink: 0; margin-top: .35rem; }
+.import-source, .import-notes { overflow-wrap: anywhere; }
+.import-notes { white-space: pre-wrap; }
+.import-submissions { display: grid; gap: .8rem; padding-left: 1.2rem; }
+.import-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .8rem; margin: 1.5rem 0; font-size: .82rem; }
+.import-page .notice { margin-top: .8rem; }
+.import-intake { margin: 1rem 0; padding: 1rem 0; border-block: 1px solid var(--line); }
+.import-intake h4 { margin-bottom: .6rem; }
+.import-intake fieldset { display: grid; gap: .8rem; min-width: 0; margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: 8px; }
+.import-intake legend { font-size: .9rem; font-weight: 600; }
+.import-upload label { display: grid; gap: .5rem; }
+.import-upload input[type="file"] { max-width: 100%; }
+.import-upload button { justify-self: start; }
+.import-upload-list { padding-left: 1.25rem; }
+.import-upload-list li { overflow-wrap: anywhere; }
+.import-plan-groups { display: grid; gap: 1.5rem; min-width: 0; }
+.import-file-section { min-width: 0; }
+.import-file-section h5 { margin: 0 0 .6rem; font-size: .95rem; }
+.import-plan-files { display: grid; gap: 1rem; margin: .8rem 0 0; padding: 0; list-style: none; }
+.import-plan-file { display: grid; gap: .6rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.import-form .import-include { flex-direction: row; align-items: start; }
+.import-form .import-include input { width: auto; margin: .2rem .3rem 0 0; }
+.catalog-actions { flex-wrap: wrap; }
+.status-submitted { background: #f8f0df; color: #826833; }
+.status-awaiting_files { background: #e5edf2; color: #486779; }
 .back-link { display: inline-flex; align-items: center; gap: .5rem; margin-bottom: 1.4rem; padding: .25rem 0; border: 0; background: none; color: #637464; cursor: pointer; font-size: .82rem; font-weight: 600; }
 .back-link:hover { color: var(--green-dark); }
 .detail-heading { display: flex; align-items: end; justify-content: space-between; gap: 1.5rem; margin-bottom: 1.5rem; }

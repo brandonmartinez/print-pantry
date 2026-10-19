@@ -1,5 +1,100 @@
 import { relations, sql } from 'drizzle-orm';
-import { bigint, check, index, integer, pgTable, text, timestamp, uuid, varchar, type AnyPgColumn } from 'drizzle-orm/pg-core';
+import { bigint, check, customType, index, integer, jsonb, pgSequence, pgTable, text, timestamp, uniqueIndex, uuid, varchar, type AnyPgColumn } from 'drizzle-orm/pg-core';
+
+export const projectIdSequence = pgSequence('project_id_seq');
+const projectIdType = customType<{ data: string; driverData: string }>({
+  dataType: () => 'bigint',
+  fromDriver: (value) => String(value),
+});
+
+export const importRequests = pgTable('import_requests', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  sourceKey: text('source_key').notNull(),
+  sourceUrl: text('source_url').notNull(),
+  canonicalUrl: text('canonical_url').notNull(),
+  provider: text('provider').notNull(),
+  externalModelId: text('external_model_id'),
+  externalProfileId: text('external_profile_id'),
+  title: text('title'),
+  status: text('status', { enum: ['submitted', 'awaiting_files', 'ready_for_review', 'publishing', 'catalog_pending', 'imported', 'declined', 'canceled'] }).notNull().default('submitted'),
+  revision: integer('revision').notNull().default(0),
+  projectId: projectIdType('project_id').references(() => projects.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('import_requests_active_source_idx').on(table.sourceKey)
+    .where(sql`${table.status} IN ('submitted', 'awaiting_files', 'ready_for_review', 'publishing', 'catalog_pending')`),
+  index('import_requests_created_idx').on(table.createdAt),
+  check('import_requests_status_check', sql`${table.status} IN ('submitted', 'awaiting_files', 'ready_for_review', 'publishing', 'catalog_pending', 'imported', 'declined', 'canceled')`),
+]);
+
+export const importSubmissions = pgTable('import_submissions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requestId: uuid('request_id').notNull().references(() => importRequests.id),
+  requesterId: uuid('requester_id').notNull().references(() => users.id),
+  submissionKey: uuid('submission_key').notNull(),
+  sourceUrl: text('source_url').notNull(),
+  title: text('title'),
+  notes: text('notes'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('import_submissions_idempotency_idx').on(table.requesterId, table.submissionKey),
+  index('import_submissions_request_idx').on(table.requestId),
+]);
+
+export const importEvents = pgTable('import_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requestId: uuid('request_id').notNull().references(() => importRequests.id),
+  actorId: uuid('actor_id').notNull().references(() => users.id),
+  status: text('status', { enum: ['submitted', 'awaiting_files', 'ready_for_review', 'publishing', 'catalog_pending', 'imported', 'declined', 'canceled'] }).notNull(),
+  note: text('note'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [index('import_events_request_idx').on(table.requestId)]);
+
+export const projectSources = pgTable('project_sources', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: projectIdType('project_id').notNull().references(() => projects.id),
+  sourceKey: text('source_key').notNull(),
+  sourceUrl: text('source_url').notNull(),
+  canonicalUrl: text('canonical_url').notNull(),
+  provider: text('provider').notNull(),
+  externalModelId: text('external_model_id'),
+  externalProfileId: text('external_profile_id'),
+  evidence: text('evidence').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('project_sources_project_source_idx').on(table.projectId, table.sourceKey),
+  index('project_sources_key_idx').on(table.sourceKey),
+]);
+
+export const importIntakes = pgTable('import_intakes', {
+  requestId: uuid('request_id').primaryKey().references(() => importRequests.id),
+  plan: jsonb('plan'),
+  lastError: text('last_error'),
+  reservedProjectId: projectIdType('reserved_project_id'),
+  publishedPath: text('published_path'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const importUploads = pgTable('import_uploads', {
+  id: uuid('id').primaryKey(),
+  requestId: uuid('request_id').notNull().references(() => importIntakes.requestId),
+  name: text('name').notNull(),
+  storedPath: text('stored_path').notNull(),
+  contentHash: text('content_hash').notNull(),
+  sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull(),
+  removedAt: timestamp('removed_at', { withTimezone: true }),
+}, (table) => [index('import_uploads_request_idx').on(table.requestId)]);
+
+export const importFiles = pgTable('import_files', {
+  id: uuid('id').primaryKey(),
+  requestId: uuid('request_id').notNull().references(() => importIntakes.requestId),
+  uploadId: uuid('upload_id').notNull().references(() => importUploads.id),
+  originalPath: text('original_path').notNull(),
+  storedPath: text('stored_path').notNull(),
+  contentHash: text('content_hash').notNull(),
+  sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull(),
+}, (table) => [index('import_files_request_idx').on(table.requestId)]);
 
 export const appMetadata = pgTable('app_metadata', {
   key: varchar('key', { length: 128 }).primaryKey(),
@@ -16,9 +111,10 @@ export const categories = pgTable('categories', {
   sql`to_tsvector('simple', coalesce(${table.name}, '') || ' ' || coalesce(${table.relativePath}, ''))`)]);
 
 export const projects = pgTable('projects', {
-  id: uuid('id').primaryKey().defaultRandom(),
+  id: projectIdType('id').primaryKey().default(sql`nextval('project_id_seq')`),
   categoryId: uuid('category_id').references(() => categories.id),
-  relativePath: text('relative_path').notNull().unique(),
+  storageKind: text('storage_kind', { enum: ['legacy', 'managed'] }).notNull().default('legacy'),
+  relativePath: text('relative_path').notNull(),
   name: text('name').notNull(),
   description: text('description'),
   tags: text('tags').array().notNull().default([]),
@@ -31,6 +127,7 @@ export const projects = pgTable('projects', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
+  uniqueIndex('projects_storage_path_idx').on(table.storageKind, table.relativePath),
   index('projects_category_idx').on(table.categoryId),
   index('projects_search_idx').using('gin', sql`to_tsvector('simple', coalesce(${table.name}, '') || ' ' ||
     coalesce(${table.description}, '') || ' ' || coalesce(print_pantry_tags_text(${table.tags}), '') || ' ' ||
@@ -46,8 +143,9 @@ export const projectBoundaryOverrides = pgTable('project_boundary_overrides', {
 
 export const assets = pgTable('assets', {
   id: uuid('id').primaryKey().defaultRandom(),
-  projectId: uuid('project_id').notNull().references(() => projects.id),
-  relativePath: text('relative_path').notNull().unique(),
+  projectId: projectIdType('project_id').notNull().references(() => projects.id),
+  storageKind: text('storage_kind', { enum: ['legacy', 'managed'] }).notNull().default('legacy'),
+  relativePath: text('relative_path').notNull(),
   projectRelativePath: text('project_relative_path').notNull(),
   name: text('name').notNull(),
   sortOrder: integer('sort_order').notNull().default(0),
@@ -63,6 +161,7 @@ export const assets = pgTable('assets', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
+  uniqueIndex('assets_storage_path_idx').on(table.storageKind, table.relativePath),
   index('assets_project_idx').on(table.projectId),
   index('assets_search_idx').using('gin',
     sql`to_tsvector('simple', coalesce(${table.name}, '') || ' ' || coalesce(${table.projectRelativePath}, ''))`),
@@ -117,7 +216,7 @@ export const sessions = pgTable('sessions', {
 
 export const printRequests = pgTable('print_requests', {
   id: uuid('id').primaryKey().defaultRandom(),
-  projectId: uuid('project_id').notNull().references(() => projects.id),
+  projectId: projectIdType('project_id').notNull().references(() => projects.id),
   projectName: text('project_name').notNull(),
   requesterId: uuid('requester_id').notNull().references(() => users.id),
   status: text('status', { enum: ['requested', 'queued', 'printing', 'completed', 'declined', 'canceled'] }).notNull(),

@@ -9,6 +9,8 @@ const appTables = new Set([
   'assets', 'asset_versions', 'scan_runs', 'scan_errors',
   'users', 'sessions', 'print_requests', 'print_request_files',
   'print_request_history', 'request_queue_state',
+  'import_requests', 'import_submissions', 'import_events', 'project_sources',
+  'import_intakes', 'import_uploads', 'import_files',
 ]);
 
 export async function runMigrations(connectionString: string, migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.url))) {

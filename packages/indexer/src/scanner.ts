@@ -51,9 +51,12 @@ const kinds: Record<string, Kind> = {
   '.fcstd': 'source', '.iges': 'source', '.igs': 'source', '.dxf': 'source',
   '.svg': 'image', '.png': 'image', '.jpg': 'image', '.jpeg': 'image',
   '.gif': 'image', '.webp': 'image', '.pdf': 'document', '.md': 'document',
-  '.txt': 'document', '.json': 'document', '.url': 'document',
+  '.txt': 'document', '.json': 'document', '.url': 'document', '.webloc': 'document',
   '.gcode': 'print', '.bgcode': 'print', '.gx': 'print',
 };
+export function classifyLibraryExtension(extension: string): Kind {
+  return kinds[extension.toLowerCase()] ?? 'other';
+}
 const formatFolders = new Set(['files', 'stl', '3mf', 'obj', 'source', 'sources', 'models', 'variants']);
 const MAX_SIDECAR_BYTES = 128 * 1024;
 
@@ -175,9 +178,13 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
         errors.push({ relativePath: null, code: 'LIBRARY_OFFLINE', message: result.message });
         return await finish();
       }
-      const previousProjects = await db.select().from(schema.projects);
-      const previousAssets = await db.select().from(schema.assets);
-      const previousVersions = await db.select().from(schema.assetVersions);
+      const previousProjects = await db.select().from(schema.projects)
+        .where(eq(schema.projects.storageKind, 'legacy'));
+      const previousAssets = await db.select().from(schema.assets)
+        .where(eq(schema.assets.storageKind, 'legacy'));
+      const previousVersions = await db.select({ version: schema.assetVersions }).from(schema.assetVersions)
+        .innerJoin(schema.assets, eq(schema.assetVersions.assetId, schema.assets.id))
+        .where(eq(schema.assets.storageKind, 'legacy')).then((rows) => rows.map((row) => row.version));
       const previousVersionById = new Map(previousVersions.map((version) => [version.id, version]));
       const overrides = new Map((await db.select().from(schema.projectBoundaryOverrides))
         .map((override) => [override.relativePath, override.kind]));
@@ -209,7 +216,7 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
             } else if (childStat.isFile() && entry.name !== '.DS_Store') {
               const extension = extname(entry.name).toLowerCase();
               const file: FileInfo = { path: childPath, fullPath, stat: childStat, extension,
-                kind: kinds[extension] ?? 'other', hash: '', thumbnailEntry: null, validationError: null };
+                kind: classifyLibraryExtension(extension), hash: '', thumbnailEntry: null, validationError: null };
               node.files.push(file);
               allFiles.push(file);
             }
@@ -461,15 +468,17 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
         for (const { project, files, existing } of plans) {
           const projectPath = project.directory.path;
           const categoryId = await categoryFor(projectPath);
-          const projectId = existing?.id ?? randomUUID();
+          let projectId = existing?.id;
           if (existing) {
+            projectId = existing.id;
             await tx.update(schema.projects).set({
               relativePath: projectPath, categoryId, name: basename(projectPath),
               missingAt: null, updatedAt: new Date(),
             }).where(eq(schema.projects.id, projectId));
           } else {
-            await tx.insert(schema.projects).values({ id: projectId, categoryId, relativePath: projectPath,
-              name: basename(projectPath), ...project.metadata });
+            const [inserted] = await tx.insert(schema.projects).values({ categoryId, relativePath: projectPath,
+              name: basename(projectPath), ...project.metadata }).returning({ id: schema.projects.id });
+            projectId = inserted.id;
           }
           seenProjects.push(projectId);
           for (const [sortOrder, file] of files.entries()) {
@@ -513,27 +522,27 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
             && !file.validationError && !blockedAssets.has(file.path));
           if (preview) {
             const asset = (await tx.select({ id: schema.assets.id }).from(schema.assets)
-              .where(eq(schema.assets.relativePath, preview.path)))[0];
+              .where(and(eq(schema.assets.storageKind, 'legacy'), eq(schema.assets.relativePath, preview.path))))[0];
             if (asset) await tx.update(schema.projects).set({ previewAssetId: asset.id })
               .where(and(eq(schema.projects.id, projectId), isNull(schema.projects.previewAssetId)));
           }
         }
         await tx.execute(`UPDATE projects p SET preview_asset_id = NULL
-          WHERE p.preview_asset_id IS NOT NULL
+          WHERE p.storage_kind = 'legacy' AND p.preview_asset_id IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.id = p.preview_asset_id AND a.project_id = p.id)`);
         result.status = errors.length ? 'partial' : 'succeeded';
         if (result.status === 'succeeded') {
           const now = new Date();
           await tx.update(schema.assets).set({ missingAt: now })
-            .where(seenAssets.length
+            .where(and(eq(schema.assets.storageKind, 'legacy'), seenAssets.length
               ? and(isNull(schema.assets.missingAt), notInArray(schema.assets.id, seenAssets))
-              : isNull(schema.assets.missingAt));
+              : isNull(schema.assets.missingAt)));
           await tx.update(schema.projects).set({ missingAt: now })
-            .where(seenProjects.length
+            .where(and(eq(schema.projects.storageKind, 'legacy'), seenProjects.length
               ? and(isNull(schema.projects.missingAt), notInArray(schema.projects.id, seenProjects))
-              : isNull(schema.projects.missingAt));
+              : isNull(schema.projects.missingAt)));
           const missing = await tx.select({ versionId: schema.assets.currentVersionId }).from(schema.assets)
-            .where(isNotNull(schema.assets.missingAt));
+            .where(and(eq(schema.assets.storageKind, 'legacy'), isNotNull(schema.assets.missingAt)));
           for (const asset of missing) if (asset.versionId) await tx.update(schema.assetVersions)
             .set({ missingAt: now }).where(eq(schema.assetVersions.id, asset.versionId));
         }

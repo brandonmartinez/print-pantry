@@ -118,8 +118,8 @@ uses `/api/auth/login`, `/api/auth/me`, and `/api/auth/logout`. Frontend and
 external clients must forward the session cookie. Generated STL thumbnails,
 validated images, embedded 3MF thumbnails, and the lazy, sampled interactive
 STL geometry endpoint are served only through authenticated routes with
-bounded processing; unsupported source files remain downloadable. This phase
-does not scrape external metadata or upload files.
+bounded processing; unsupported source files remain downloadable. The app
+does not scrape external sites; operators can upload files through Imports.
 
 The operator UI can mark a project folder as an explicit boundary. For a deeper
 collection that the default grouping misclassifies, the same operator-only
@@ -129,12 +129,34 @@ or `"kind":"project"`; `DELETE /api/catalog/boundaries` with the same
 paths, not absolute host paths. Rescan after changing a boundary.
 
 For backups, stop writes and back up the PostgreSQL database **as well as**
-the separately maintained library. Verify the database backup by restoring
+the legacy library, managed library, and retained import originals. Verify the database backup by restoring
 into a separate disposable PostgreSQL instance, applying migrations there,
 and checking project/asset/version counts and representative metadata without
 pointing the restored instance at the real library. Never use a restore test
 against an existing database or let it scan the real NAS. Include request,
 selected-file, queue, and action-history records in restore verification.
+
+## New-print submissions and import queue
+
+Any signed-in household user can choose **Add New Print**, check a source URL,
+and submit an optional title and notes to **Imports**. Operators can open the
+source website, accept the submission into **Awaiting files**, or decline/cancel
+it with a reason. Matching active imports are shared without exposing another
+requester's private submission notes. This queue is separate from the existing
+file-backed print queue.
+
+Operators can now prepare intake storage, upload individual files or ZIPs,
+review deterministic organization and metadata, and publish a new managed
+project. Original uploads are retained separately; publishing does not write
+to or reorganize the legacy library. Development defaults to ignored
+`.pantry-data/intake` and `.pantry-data/library`; production uses separate
+persistent volumes. No AI key is required. See
+[the testing checkpoint and API guide](docs/import-queue.md) for the exact scope,
+known-site matching, privacy rules, and hands-on checks, and
+[the phased plan](docs/import-plan.md) for subsequent library-management work.
+Project IDs are now database-generated bigint values represented as decimal
+strings in APIs. Versioned migrations preserve catalog records and existing
+print-request references; existing folders are not renamed.
 
 ## Print requests and operator queue
 

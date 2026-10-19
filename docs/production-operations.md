@@ -20,6 +20,9 @@ substitute development commands into a NAS. The deployment provides:
   a host-local database;
 - a read-only library mount at `LIBRARY_ROOT`, persistent database storage,
   internal-only database networking, and application readiness checks;
+- separate writable `pantry_import_data` and `pantry_managed_library` volumes
+  for retained intake originals and published projects; never make the legacy
+  library mount writable to enable imports;
 - a mandatory BuildKit npm configuration secret sourced from the existing
   host npm configuration. The build must fail when that configured registry is
   unavailable, rather than retrying against a public registry.
@@ -189,18 +192,20 @@ this repository.
 
 ## Backup and restore verification
 
-The database and the real library are separate recovery domains. Back up both:
+The database and filesystem stores are separate recovery domains. Back up all:
 
 | Domain | Include | Consistency requirement |
 | --- | --- | --- |
 | PostgreSQL | Catalog, accounts, sessions, requests, queue state, selected versions, and action history | Quiesce writes or use a PostgreSQL-consistent backup method. |
 | Library | Model files, assets, sidecars, source metadata, and archive roots | Use storage-consistent snapshots/copies and retain the source-to-backup mapping. |
+| Managed library | Entire `pantry_managed_library` volume, including project manifests and any recovery staging directories | Quiesce import publication and capture with the matching database. |
+| Import originals | Entire `pantry_import_data` volume, including batch receipts, recovery manifests, raw archives, and extracted input files | Retain even soft-removed inputs; capture with the matching database. |
 | Deployment secrets/configuration | Environment values, password-file location, library/client mount mapping, and reverse-proxy configuration | Store separately with access controls; never commit secrets. |
 
 Verify every backup non-destructively before relying on it:
 
 Quiesce application and import/SMB writes while capturing a coordinated
-database dump and library snapshot/copy. A PostgreSQL dump is internally
+database dump and snapshots/copies of every filesystem store. A PostgreSQL dump is internally
 consistent, but it does not freeze a separately mounted library. Record both
 capture times and reject a pair if file content changed between captures.
 Retain backups and their restore evidence according to an owner-approved
@@ -241,6 +246,28 @@ selected versions, request/history/queue records, and authenticated
 download/preview from the isolated restored pair. Record the backup identifier,
 software revision, verification date, and result. Treat a failed verification
 as an unusable backup.
+
+Manual intake uses `IMPORT_STORAGE_ROOT=/var/lib/print-pantry/imports` and
+`MANAGED_LIBRARY_ROOT=/var/lib/print-pantry/managed` in production Compose.
+Custom mounts must keep those roots separate from each other and from the
+legacy root, writable only by the application account, and free of symlink
+components. Do not run external writers against managed projects. Configure
+`MANAGED_CLIENT_MOUNT_PREFIX` only when clients have a separate usable mount.
+The included nginx permits 256 MiB upload bodies and 300-second upstream
+timeouts; an outer proxy must also permit the intended upload size/time.
+
+Intake operations are synchronous requests with durable recovery states.
+After an interrupted publish, open the import and retry publication;
+`publishing` or `catalog_pending` reuses its reserved project identity,
+verifies the existing manifest and complete file inventory, and registers the
+catalog without overwriting an unrelated destination. Investigate storage or
+hash errors rather than modifying manifests to force a retry. A retry that
+finds new duplicates requires explicit acknowledgement. There is no periodic
+managed-root reconciler yet: do not edit or remove managed files externally.
+Never manually delete originals or stage folders while an operation is active.
+Retained originals have no automatic purge; agree a retention policy and
+independent backup before any future cleanup feature is enabled. See
+[the manual-import guide](import-queue.md) for limits and operator testing.
 
 Refuse a restore target unless it is positively identified as the disposable
 verification instance. Do not automate broad deletes, volume removal, or a

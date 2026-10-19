@@ -14,3 +14,4 @@ deploy/*.secret
 .devcontainer/proxy.env
 .devcontainer/npmrc
 .devcontainer/ca.pem
+.pantry-data/

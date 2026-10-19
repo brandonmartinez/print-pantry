@@ -3,10 +3,13 @@ import Fastify from 'fastify';
 import { createAuth } from './auth.js';
 import { registerCatalog, type CatalogOptions } from './catalog.js';
 import { registerRequests } from './requests.js';
+import { registerImports } from './imports.js';
+import { registerImportIntake } from './import-intake.js';
+import type { ImportStorage } from './import-storage.js';
 
 export function buildServer(
   pool: { query(sql: string): Promise<unknown> },
-  catalog?: CatalogOptions & { secureCookie: boolean },
+  catalog?: CatalogOptions & { secureCookie: boolean; importStorage?: ImportStorage },
   publicOrigin?: string,
 ) {
   const server = Fastify({ logger: true });
@@ -38,6 +41,8 @@ export function buildServer(
     const auth = createAuth(server, catalog.pool, catalog.secureCookie);
     registerCatalog(server, catalog, auth);
     registerRequests(server, catalog.pool, auth, catalog.indexer);
+    registerImports(server, catalog.pool, auth);
+    registerImportIntake(server, catalog.pool, auth, catalog.root, catalog.importStorage);
   }
 
   return server;

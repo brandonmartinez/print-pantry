@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isProjectId, projectIdPattern } from '@print-pantry/contracts';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { FileHandle } from 'node:fs/promises';
 import type { createPool } from '@print-pantry/db';
@@ -28,17 +29,21 @@ export type GeometryReader = (handle: FileHandle) => Promise<{
 }>;
 export type CatalogOptions = {
   pool: Pool; root: string; clientMountPrefix?: string; indexer: Indexer;
+  managedRoot?: string;
+  managedClientMountPrefix?: string;
   read3mfThumbnail?: ThumbnailReader;
   read3mfGeometry?: GeometryReader;
 };
 
 type ProjectRow = {
+  storage_kind: 'legacy' | 'managed';
   id: string; name: string; relative_path: string; category_path: string | null;
   description: string | null; tags: string[]; designer: string | null; source_url: string | null;
   license: string | null; notes: string | null; missing_at: Date | null;
   asset_count: number; preview_asset_id: string | null; is_boundary?: boolean;
 };
 type AssetRow = {
+  storage_kind: 'legacy' | 'managed';
   id: string; project_id: string; relative_path: string; project_relative_path: string;
   name: string; kind: string; extension: string; sort_order: number; size_bytes: string | number;
   mtime_ms: string | number; current_version_id: string | null; missing_at: Date | null;
@@ -51,6 +56,7 @@ type ScanRow = {
 
 const uuid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 const idParams = { type: 'object', required: ['id'], properties: { id: { type: 'string', pattern: uuid } } } as const;
+const projectParams = { type: 'object', required: ['id'], properties: { id: { type: 'string', pattern: projectIdPattern } } } as const;
 const natural = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const previewable = `a.current_version_id IS NOT NULL AND
   NOT EXISTS (SELECT 1 FROM asset_versions v WHERE v.id = a.current_version_id AND v.validation_error IS NOT NULL)
@@ -74,7 +80,7 @@ function safeSource(source: string | null): string | null {
 function summary(row: ProjectRow, mount?: string) {
   const segments = row.category_path?.split('/') ?? [];
   return {
-    id: row.id, name: row.name, category: segments[0] ?? null,
+    id: row.id, name: row.name, storageKind: row.storage_kind, category: segments[0] ?? null,
     subcategory: segments.slice(1).join('/') || null,
     description: row.description, tags: row.tags, available: !row.missing_at,
     assetCount: Number(row.asset_count), clientPath: clientPath(mount, row.relative_path),
@@ -105,10 +111,12 @@ async function scanStatus(pool: Pool, indexer: Indexer) {
 }
 
 async function projectById(pool: Pool, id: string): Promise<ProjectRow | undefined> {
+  if (!isProjectId(id)) return undefined;
   const result = await pool.query<ProjectRow>(
-    `SELECT p.id, p.name, p.relative_path, c.relative_path AS category_path, p.description,
+    `SELECT p.id, p.name, p.storage_kind, p.relative_path, c.relative_path AS category_path, p.description,
        p.tags, p.designer, p.source_url, p.license, p.notes, p.missing_at,
-       EXISTS (SELECT 1 FROM project_boundary_overrides o WHERE o.relative_path = p.relative_path) AS is_boundary,
+       (p.storage_kind = 'legacy' AND EXISTS
+         (SELECT 1 FROM project_boundary_overrides o WHERE o.relative_path = p.relative_path)) AS is_boundary,
        (SELECT count(*)::int FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL) AS asset_count,
        coalesce(
          (SELECT a.id FROM assets a WHERE a.id = p.preview_asset_id AND a.project_id = p.id
@@ -125,9 +133,9 @@ async function projectById(pool: Pool, id: string): Promise<ProjectRow | undefin
 
 async function assetById(pool: Pool, id: string): Promise<AssetRow | undefined> {
   const result = await pool.query<AssetRow>(
-    `SELECT a.id, a.project_id, a.relative_path, a.project_relative_path, a.name, a.kind,
+    `SELECT a.id, a.project_id, p.storage_kind, a.relative_path, a.project_relative_path, a.name, a.kind,
        a.extension, a.sort_order, a.size_bytes, a.mtime_ms, a.current_version_id,
-       a.missing_at, v.validation_error, v.content_hash FROM assets a
+       a.missing_at, v.validation_error, v.content_hash FROM assets a JOIN projects p ON p.id = a.project_id
        LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.id = $1`,
     [id],
   );
@@ -137,7 +145,7 @@ async function assetById(pool: Pool, id: string): Promise<AssetRow | undefined> 
 function assetResponse(row: AssetRow, mount?: string) {
   const folders = row.project_relative_path.split('/').slice(0, -1);
   const variantFolders = folders.filter((folder) =>
-    !['files', 'stl', '3mf', 'obj', 'images', 'source', 'sources'].includes(folder.toLowerCase()));
+    !['files', 'stl', '3mf', 'obj', 'models', 'docs', 'exports', 'images', 'source', 'sources'].includes(folder.toLowerCase()));
   return {
     id: row.id, versionId: row.current_version_id, name: row.name,
     relativePath: row.project_relative_path, variant: variantFolders.join('/') || null,
@@ -181,6 +189,17 @@ function libraryError(reply: FastifyReply, error: unknown) {
 
 export function registerCatalog(server: FastifyInstance, options: CatalogOptions, auth: Auth) {
   const { pool, root, indexer, clientMountPrefix: mount } = options;
+  const mountFor = (row: ProjectRow | AssetRow) =>
+    row.storage_kind === 'managed' ? options.managedClientMountPrefix : mount;
+  function rootFor(asset: AssetRow): string {
+    if (asset.storage_kind !== 'managed') return root;
+    if (!options.managedRoot) {
+      const error = new LibraryUnavailableError();
+      error.message = 'Managed storage is unavailable';
+      throw error;
+    }
+    return options.managedRoot;
+  }
   const preview = createPreviewLimiter();
   const verifyDownload = createPreviewLimiter();
   let rescanPending = false;
@@ -235,7 +254,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
         values,
       );
       const rows = await pool.query<ProjectRow>(
-        `SELECT p.id, p.name, p.relative_path, c.relative_path AS category_path, p.description,
+        `SELECT p.id, p.name, p.storage_kind, p.relative_path, c.relative_path AS category_path, p.description,
            p.tags, p.designer, p.source_url, p.license, p.notes, p.missing_at,
            (SELECT count(*)::int FROM assets a WHERE a.project_id = p.id AND a.missing_at IS NULL) AS asset_count,
            coalesce(
@@ -253,7 +272,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
         "SELECT DISTINCT split_part(c.relative_path, '/', 1) AS category FROM categories c JOIN projects p ON p.category_id = c.id ORDER BY category",
       );
       return {
-        items: rows.rows.map((row) => summary(row, mount)), total: Number(count.rows[0].total),
+        items: rows.rows.map((row) => summary(row, mountFor(row))), total: Number(count.rows[0].total),
         page, pageSize, categories: categories.rows.map((row) => row.category),
         fileTypes: ['mesh', 'source', 'image', 'document', 'print', 'other'],
         scan: await scanStatus(pool, indexer),
@@ -262,23 +281,23 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
   );
 
   server.get<{ Params: { id: string } }>('/catalog/projects/:id', {
-    preHandler: auth.authenticate, schema: { params: idParams },
+    preHandler: auth.authenticate, schema: { params: projectParams },
   }, async (request, reply) => {
     const row = await projectById(pool, request.params.id);
     if (!row) return reply.code(404).send({ error: 'Project not found' });
     const assets = await pool.query<AssetRow>(
-      `SELECT a.id, a.project_id, a.relative_path, a.project_relative_path, a.name, a.kind,
+      `SELECT a.id, a.project_id, p.storage_kind, a.relative_path, a.project_relative_path, a.name, a.kind,
          a.extension, a.sort_order, a.size_bytes, a.mtime_ms, a.current_version_id,
-         a.missing_at, v.validation_error FROM assets a
+         a.missing_at, v.validation_error FROM assets a JOIN projects p ON p.id = a.project_id
          LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.project_id = $1`,
       [row.id],
     );
     return { project: {
-      ...summary(row, mount), designer: row.designer, sourceUrl: safeSource(row.source_url),
+      ...summary(row, mountFor(row)), designer: row.designer, sourceUrl: safeSource(row.source_url),
       license: row.license, notes: row.notes, isBoundary: row.is_boundary,
       files: assets.rows.sort((a, b) =>
         a.sort_order - b.sort_order || natural.compare(a.project_relative_path, b.project_relative_path))
-        .map((asset) => assetResponse(asset, mount)),
+        .map((asset) => assetResponse(asset, mountFor(asset))),
     } };
   });
 
@@ -288,7 +307,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
   } }>('/catalog/projects/:id', {
     preHandler: auth.operatorOnly,
     schema: {
-      params: idParams,
+      params: projectParams,
       body: {
         type: 'object', additionalProperties: false, minProperties: 1,
         properties: {
@@ -307,6 +326,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       license: 'license', notes: 'notes',
     };
     const input = request.body;
+    if (!isProjectId(request.params.id)) return reply.code(400).send({ error: 'Invalid project ID' });
     if (input.sourceUrl && !safeSource(input.sourceUrl)) {
       return reply.code(400).send({ error: 'Source URL must use http or https' });
     }
@@ -329,7 +349,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       oneOf: [
         {
           type: 'object', additionalProperties: false, required: ['projectId', 'isBoundary'],
-          properties: { projectId: { type: 'string', pattern: uuid }, isBoundary: { type: 'boolean' } },
+          properties: { projectId: { type: 'string', pattern: projectIdPattern }, isBoundary: { type: 'boolean' } },
         },
         {
           type: 'object', additionalProperties: false, required: ['relativePath', 'kind'],
@@ -348,6 +368,9 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     if ('projectId' in request.body) {
       const project = await projectById(pool, request.body.projectId);
       if (!project) return reply.code(404).send({ error: 'Project not found' });
+      if (project.storage_kind === 'managed') {
+        return reply.code(400).send({ error: 'Boundary overrides apply only to legacy projects' });
+      }
       relativePath = project.relative_path;
       isBoundary = request.body.isBoundary;
       projectId = project.id;
@@ -404,7 +427,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       return reply.code(410).send({ error: 'Requested version is unavailable' });
     }
     try {
-      const { handle, stats } = await openLibraryFile(root, asset.relative_path);
+      const { handle, stats } = await openLibraryFile(rootFor(asset), asset.relative_path);
       if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
         await handle.close();
         return reply.code(409).send({ error: 'File changed since indexing; rescan before downloading' });
@@ -444,7 +467,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     if (asset.missing_at || !asset.current_version_id) return reply.code(410).send({ error: 'Preview source is unavailable' });
     if (asset.validation_error) return reply.code(422).send({ error: 'Indexed preview is invalid; inspect scan status' });
     try {
-      const { handle, stats } = await openLibraryFile(root, asset.relative_path);
+      const { handle, stats } = await openLibraryFile(rootFor(asset), asset.relative_path);
       try {
         if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
           return reply.code(409).send({ error: 'Preview source changed since indexing' });
@@ -510,7 +533,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     }
     try {
       return await preview(async () => {
-        const { handle, stats } = await openLibraryFile(root, asset.relative_path);
+        const { handle, stats } = await openLibraryFile(rootFor(asset), asset.relative_path);
         try {
           if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
             return reply.code(409).send({ error: 'Mesh changed since indexing; rescan before previewing' });
@@ -533,7 +556,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
   });
 
   server.get<{ Params: { id: string } }>('/catalog/projects/:id/preview', {
-    preHandler: auth.authenticate, schema: { params: idParams },
+    preHandler: auth.authenticate, schema: { params: projectParams },
   }, async (request, reply) => {
     const project = await projectById(pool, request.params.id);
     if (!project) return reply.code(404).send({ error: 'Project not found' });

@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdtemp, mkdir, open, readFile, rename, rm, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq, inArray, like } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase, createPool, runMigrations, schema } from '@print-pantry/db';
-import { createLibraryIndexer, Invalid3mfError, read3mfGeometryFromHandle, read3mfThumbnail, read3mfThumbnailFromHandle,
+import { classifyLibraryExtension, createLibraryIndexer, Invalid3mfError, read3mfGeometryFromHandle, read3mfThumbnail, read3mfThumbnailFromHandle,
   ScanInProgressError } from './index.js';
 
 const url = process.env.TEST_DATABASE_URL;
@@ -70,7 +69,7 @@ async function scan(indexer: ReturnType<typeof createLibraryIndexer>) {
 beforeAll(async () => runMigrations(url));
 afterAll(async () => pool.end());
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'pp-indexer-'));
+  root = await mkdtemp(join(process.cwd(), '.pp-indexer-'));
   prefix = randomUUID();
   offlineRoot = '';
 });
@@ -110,6 +109,69 @@ afterEach(async () => {
 });
 
 describe('read-only catalog reconciliation', () => {
+  it('exports the shared, case-insensitive library extension classifier', () => {
+    expect(['.STL', '.step', '.png', '.webloc', '.gcode', '.unknown'].map(classifyLibraryExtension))
+      .toEqual(['mesh', 'source', 'image', 'document', 'print', 'other']);
+  });
+
+  it('isolates managed records with colliding paths across successful, empty and offline legacy scans', async () => {
+    await fixture('Models/Project/part.stl');
+    const [category] = await db.insert(schema.categories).values({
+      relativePath: `${prefix}/Curated`, name: 'Explicit managed category',
+    }).returning();
+    const managedProjects = await db.insert(schema.projects).values([{
+      storageKind: 'managed', relativePath: `${prefix}/Models/Project`,
+      categoryId: category.id, name: 'Authored managed name', description: 'Do not replace',
+      tags: ['managed'], notes: 'Authored notes',
+    }, {
+      storageKind: 'managed', relativePath: `${prefix}/Managed missing`,
+      categoryId: category.id, name: 'Missing managed name', missingAt: new Date('2025-01-01'),
+    }]).returning();
+    const managedAssets = await db.insert(schema.assets).values(managedProjects.map((project, index) => ({
+      storageKind: 'managed' as const, projectId: project.id,
+      relativePath: `${project.relativePath}/part.stl`, projectRelativePath: 'part.stl',
+      name: 'Managed part', kind: 'mesh' as const, extension: '.stl',
+      sizeBytes: 13, mtimeMs: 0, contentHash: 'managed-hash',
+      missingAt: index ? new Date('2025-01-01') : null,
+    }))).returning();
+    for (const asset of managedAssets) {
+      const [version] = await db.insert(schema.assetVersions).values({
+        assetId: asset.id, contentHash: 'managed-hash', sizeBytes: 13, mtimeMs: 0,
+        missingAt: asset.missingAt,
+      }).returning();
+      await db.update(schema.assets).set({ currentVersionId: version.id }).where(eq(schema.assets.id, asset.id));
+    }
+    const state = async () => ({
+      projects: await db.select().from(schema.projects).where(inArray(schema.projects.id, managedProjects.map((p) => p.id))),
+      assets: await db.select().from(schema.assets).where(inArray(schema.assets.id, managedAssets.map((a) => a.id))),
+      versions: await db.select().from(schema.assetVersions)
+        .where(inArray(schema.assetVersions.assetId, managedAssets.map((a) => a.id))),
+      category: await db.select().from(schema.categories).where(eq(schema.categories.id, category.id)),
+    });
+    const before = await state();
+    const indexer = createLibraryIndexer({ db, root });
+    expect((await scan(indexer)).status).toBe('succeeded');
+    expect(await state()).toEqual(before);
+    const colliding = await db.select().from(schema.projects)
+      .where(eq(schema.projects.relativePath, `${prefix}/Models/Project`));
+    expect(colliding.map((project) => project.storageKind).sort()).toEqual(['legacy', 'managed']);
+    const collidingAssets = await db.select().from(schema.assets)
+      .where(eq(schema.assets.relativePath, `${prefix}/Models/Project/part.stl`));
+    expect(collidingAssets.map((asset) => asset.storageKind).sort()).toEqual(['legacy', 'managed']);
+    await rename(join(root, prefix, 'Models', 'Project'), join(root, prefix, 'Models', 'Renamed'));
+    expect((await scan(indexer)).status).toBe('succeeded');
+    expect(await state()).toEqual(before);
+    await rm(join(root, prefix), { recursive: true });
+    expect((await scan(indexer)).status).toBe('partial');
+    expect(await state()).toEqual(before);
+    expect((await scan(createLibraryIndexer({ db, root, allowEmptyLibrary: true }))).status).toBe('succeeded');
+    expect(await state()).toEqual(before);
+    offlineRoot = `${root}-offline`;
+    await rename(root, offlineRoot);
+    expect((await scan(indexer)).status).toBe('offline');
+    expect(await state()).toEqual(before);
+  });
+
   it('extracts transformed mesh geometry from a 3MF build', async () => {
     const model = `<?xml version="1.0" encoding="UTF-8"?>
       <model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
@@ -328,7 +390,7 @@ describe('read-only catalog reconciliation', () => {
     await rm(join(root, prefix), { recursive: true });
     expect((await scan(indexer)).status).toBe('partial');
     await mkdir(join(root, prefix, 'Category/Sub/Project'), { recursive: true });
-    await symlink(join(tmpdir(), 'outside-library'), join(root, prefix, 'Category/Sub/Project/unsafe.stl'));
+    await symlink(join(process.cwd(), '.outside-library'), join(root, prefix, 'Category/Sub/Project/unsafe.stl'));
     const partial = await scan(indexer);
     expect(partial.status).toBe('partial');
     expect((await db.select().from(schema.projects).where(eq(schema.projects.id, project.id)))[0])
@@ -393,7 +455,7 @@ describe('read-only catalog reconciliation', () => {
 
   it('never reads an external metadata sidecar through a symlink', async () => {
     await fixture('Category/Sub/Project/model.stl');
-    const outside = await mkdtemp(join(tmpdir(), 'pp-sidecar-external-'));
+    const outside = await mkdtemp(join(process.cwd(), '.pp-sidecar-external-'));
     try {
       const external = join(outside, 'metadata.json');
       await writeFile(external, JSON.stringify({ description: 'external secret' }));

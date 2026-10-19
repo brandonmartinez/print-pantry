@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isProjectId, projectIdPattern } from '@print-pantry/contracts';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { createPool } from '@print-pantry/db';
 import type { PoolClient } from 'pg';
@@ -20,6 +21,8 @@ type RequestRow = {
   queue_position: number | null; created_at: Date; updated_at: Date;
 };
 type FileRow = {
+  storage_kind: 'legacy' | 'managed';
+  project_storage_kind: 'legacy' | 'managed';
   request_id: string; asset_id: string; version_id: string; name: string;
   relative_path: string; file_type: PrintRequestFile['fileType']; extension: string;
   size_bytes: string; content_hash: string; project_missing: boolean;
@@ -33,6 +36,7 @@ type HistoryRow = {
 };
 type QueueState = { revision: number; selected_next_id: string | null };
 type AvailableFile = {
+  storage_kind: 'legacy' | 'managed';
   id: string; name: string; project_relative_path: string;
   kind: PrintRequestFile['fileType']; extension: string; current_version_id: string | null;
   asset_missing: boolean; project_missing: boolean; version_id: string | null;
@@ -65,7 +69,7 @@ function text(value: string | null | undefined): string | null {
 function variant(relativePath: string): string | null {
   const folders = relativePath.split('/').slice(0, -1);
   return folders.filter((folder) =>
-    !['files', 'stl', '3mf', 'obj', 'images', 'source', 'sources'].includes(folder.toLowerCase()))
+    !['files', 'stl', '3mf', 'obj', 'models', 'docs', 'exports', 'images', 'source', 'sources'].includes(folder.toLowerCase()))
     .join('/') || null;
 }
 
@@ -157,7 +161,7 @@ async function fileRows(client: Connection, ids: string[], indexer: Indexer): Pr
             (p.missing_at IS NOT NULL) AS project_missing,
             (a.missing_at IS NOT NULL OR a.project_id <> r.project_id) AS asset_missing,
             (v.missing_at IS NOT NULL OR v.asset_id <> a.id) AS version_missing,
-            a.current_version_id
+            a.current_version_id, a.storage_kind, p.storage_kind AS project_storage_kind
      FROM print_request_files f
      JOIN print_requests r ON r.id = f.request_id
      JOIN projects p ON p.id = r.project_id
@@ -174,7 +178,7 @@ async function fileRows(client: Connection, ids: string[], indexer: Indexer): Pr
       : row.current_version_id && row.current_version_id !== row.version_id ? 'version_not_current'
       : row.version_missing ? 'version_missing'
       : row.current_version_id !== row.version_id ? 'version_not_current'
-      : offline ? 'library_offline' : null;
+      : offline && (row.storage_kind === 'legacy' || row.project_storage_kind === 'legacy') ? 'library_offline' : null;
     const item: PrintRequestFile = {
       assetId: row.asset_id, versionId: row.version_id, name: row.name,
       relativePath: row.relative_path, variant: variant(row.relative_path),
@@ -274,7 +278,7 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
     schema: { body: {
       type: 'object', additionalProperties: false, required: ['projectId', 'selected', 'quantity'],
       properties: {
-        projectId: { type: 'string', pattern: uuid },
+        projectId: { type: 'string', pattern: projectIdPattern },
         selected: { type: 'array', minItems: 1, items: {
           type: 'object', additionalProperties: false, required: ['assetId', 'versionId'],
           properties: { assetId: { type: 'string', pattern: uuid }, versionId: { type: 'string', pattern: uuid } },
@@ -287,6 +291,7 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
     } },
   }, async (request, reply) => {
     const input = request.body;
+    if (!isProjectId(input.projectId)) return reply.code(400).send({ error: 'Invalid project ID' });
     if (new Set(input.selected.map((item) => item.assetId)).size !== input.selected.length ||
       new Set(input.selected.map((item) => item.versionId)).size !== input.selected.length) {
       return reply.code(400).send({ error: 'Select each asset and version only once' });
@@ -297,18 +302,19 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
     const user = auth.currentUser(request);
     try {
       const { value, revision } = await withQueueMutation(pool, undefined, async (client) => {
-        if (await latestScanStatus(client, indexer) === 'offline') {
-          throw new RequestError(503, 'Library is offline; retry after a successful scan');
-        }
-        const project = await client.query<{ name: string; missing_at: Date | null }>(
-          'SELECT name, missing_at FROM projects WHERE id = $1', [input.projectId],
+        const offline = await latestScanStatus(client, indexer) === 'offline';
+        const project = await client.query<{ name: string; missing_at: Date | null; storage_kind: 'legacy' | 'managed' }>(
+          'SELECT name, missing_at, storage_kind FROM projects WHERE id = $1', [input.projectId],
         );
         if (!project.rows[0]) throw new RequestError(404, 'Project not found');
+        if (offline && project.rows[0].storage_kind === 'legacy') {
+          throw new RequestError(503, 'Library is offline; retry after a successful scan');
+        }
         if (project.rows[0].missing_at) throw new RequestError(410, 'Project is unavailable; refresh the catalog');
         const files: AvailableFile[] = [];
         for (const item of input.selected) {
           const result = await client.query<AvailableFile>(
-            `SELECT a.id, a.name, a.project_relative_path, a.kind, a.extension,
+            `SELECT a.id, a.name, a.storage_kind, a.project_relative_path, a.kind, a.extension,
                     a.current_version_id, (a.missing_at IS NOT NULL) AS asset_missing,
                     (p.missing_at IS NOT NULL) AS project_missing, v.id AS version_id,
                     (v.missing_at IS NOT NULL) AS version_missing, v.size_bytes, v.content_hash
@@ -319,6 +325,9 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
           );
           const file = result.rows[0];
           if (!file) throw new RequestError(400, 'Every selected file must belong to the chosen project');
+          if (offline && file.storage_kind === 'legacy') {
+            throw new RequestError(503, 'Library is offline; retry after a successful scan');
+          }
           if (file.asset_missing || file.project_missing || !file.version_id ||
             file.version_missing || file.current_version_id !== item.versionId) {
             throw new RequestError(410, 'Selected version is unavailable; refresh the project and choose its current file');

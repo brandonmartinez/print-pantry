@@ -143,7 +143,7 @@ function listResponse(page = 1, items = [project], total = 1) {
   return { items, total, page, pageSize: 12, categories: ['Home', 'Toys'], fileTypes: ['mesh', 'source'], scan };
 }
 
-function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueConflict?: boolean; sourceUnavailable?: boolean } = {}) {
+function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueConflict?: boolean; sourceUnavailable?: boolean; storageKind?: 'managed' | 'legacy'; isBoundary?: boolean } = {}) {
   const calls: Array<{ path: string; init?: RequestInit }> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
@@ -152,6 +152,7 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
     if (path === '/api/auth/me') return jsonResponse({ message: 'Sign in required' }, 401);
     if (path === '/api/auth/login') return jsonResponse({ user: { id: 'u-1', username: 'maker', role } });
     if (path === '/api/auth/logout') return jsonResponse(undefined, 204);
+    if (path.startsWith('/api/imports?')) return jsonResponse({ items: [], page: 1, pageSize: 12, total: 0 });
     if (path.startsWith('/api/catalog/projects?')) {
       const url = new URL(path, 'http://localhost');
       const requestedPage = Number(url.searchParams.get('page'));
@@ -173,7 +174,7 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
         sampled: true,
       });
     }
-    if (path === '/api/catalog/projects/desk-organizer') return jsonResponse({ project: detail });
+    if (path === '/api/catalog/projects/desk-organizer') return jsonResponse({ project: { ...detail, ...(options.storageKind ? { storageKind: options.storageKind } : {}), ...(options.isBoundary !== undefined ? { isBoundary: options.isBoundary } : {}) } });
     if (path === '/api/catalog/projects/desk-organizer' && method === 'PATCH') return jsonResponse({ project: detail });
     if (path === '/api/catalog/boundaries' && method === 'PUT') return jsonResponse({ project: detail });
     if (path === '/api/catalog/rescan' && method === 'POST') return jsonResponse({ scan: { state: 'scanning' } });
@@ -200,7 +201,7 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
 
 async function signIn(
   role: 'operator' | 'requester' = 'requester',
-  options: { sourceUnavailable?: boolean } = {},
+  options: { sourceUnavailable?: boolean; storageKind?: 'managed' | 'legacy'; isBoundary?: boolean } = {},
   landingHeading = 'Browse projects',
 ) {
   const api = mockApi(role, options);
@@ -229,6 +230,19 @@ it('signs in and shows the authenticated image-first catalog', async () => {
   const initialQuery = new URL(calls.find(({ path }) => path.startsWith('/api/catalog/projects?'))!.path, 'http://localhost').searchParams;
   expect(initialQuery.has('category')).toBe(false);
   expect(initialQuery.has('fileType')).toBe(false);
+});
+
+it('lets household members open Add New Print and navigate to Imports', async () => {
+  await signIn();
+  fireEvent.click(screen.getByRole('link', { name: 'Add New Print' }));
+  await screen.findByRole('heading', { name: 'Imports' });
+  expect(window.location.pathname).toBe('/imports');
+  expect(screen.getByRole('link', { name: 'Imports' }).getAttribute('aria-current')).toBe('page');
+  expect(screen.getByLabelText('Source URL')).toBeTruthy();
+  fireEvent.click(screen.getByRole('link', { name: 'Library' }));
+  await screen.findByRole('heading', { name: 'Browse projects' });
+  fireEvent.click(screen.getByRole('link', { name: 'Imports' }));
+  await screen.findByRole('heading', { name: 'Imports' });
 });
 
 it('searches, filters, and appends more projects without replacing the grid', async () => {
@@ -353,6 +367,22 @@ it('does not expose operator actions to household members', async () => {
   expect(await screen.findByRole('heading', { name: 'Desk Organizer' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Edit metadata' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Set project boundary' })).toBeNull();
+});
+
+it.each([false, true])('hides boundary actions for managed projects with isBoundary=%s while keeping metadata editing', async (isBoundary) => {
+  const { calls } = await signIn('operator', { storageKind: 'managed', isBoundary });
+  fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
+  await screen.findByRole('heading', { name: 'Desk Organizer' });
+  expect(screen.getByRole('button', { name: 'Edit metadata' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Set project boundary' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Remove boundary override' })).toBeNull();
+  expect(calls.some(({ path }) => path === '/api/catalog/boundaries')).toBe(false);
+});
+
+it('preserves explicit legacy project boundary controls', async () => {
+  await signIn('operator', { storageKind: 'legacy', isBoundary: true });
+  fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
+  expect(await screen.findByRole('button', { name: 'Remove boundary override' })).toBeTruthy();
 });
 
 it('requires explicit file-version selection and submits a bounded print request', async () => {

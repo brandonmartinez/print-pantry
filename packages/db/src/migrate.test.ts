@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { eq } from 'drizzle-orm';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDatabase, createPool, schema } from './index.js';
@@ -12,6 +13,41 @@ const pool = createPool(url);
 afterAll(async () => pool.end());
 
 describe('versioned PostgreSQL migrations', () => {
+  it('converts populated UUID projects and their foreign keys without losing content', async () => {
+    const namespace = `id_transition_${randomUUID().replaceAll('-', '')}`;
+    const sql = await readFile(new URL('../drizzle/0006_red_virginia_dare.sql', import.meta.url), 'utf8');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`CREATE SCHEMA "${namespace}"`);
+      await client.query(`SET LOCAL search_path TO "${namespace}", public`);
+      await client.query(`
+        CREATE TABLE projects (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), created_at timestamptz DEFAULT now(), name text);
+        CREATE TABLE assets (id uuid PRIMARY KEY, project_id uuid NOT NULL,
+          CONSTRAINT assets_project_id_projects_id_fk FOREIGN KEY (project_id) REFERENCES projects(id));
+        CREATE TABLE print_requests (id uuid PRIMARY KEY, project_id uuid NOT NULL,
+          CONSTRAINT print_requests_project_id_projects_id_fk FOREIGN KEY (project_id) REFERENCES projects(id));
+      `);
+      const oldId = randomUUID();
+      const assetId = randomUUID();
+      const requestId = randomUUID();
+      await client.query('INSERT INTO projects (id, name) VALUES ($1,$2)', [oldId, 'Keep original project']);
+      await client.query('INSERT INTO assets (id, project_id) VALUES ($1,$2)', [assetId, oldId]);
+      await client.query('INSERT INTO print_requests (id, project_id) VALUES ($1,$2)', [requestId, oldId]);
+      await client.query(sql.replace('"public"."project_id_seq"', `"${namespace}"."project_id_seq"`));
+      const result = await client.query(`
+        SELECT p.id, p.name, a.id AS asset_id, r.id AS request_id
+        FROM projects p JOIN assets a ON a.project_id = p.id JOIN print_requests r ON r.project_id = p.id
+      `);
+      expect(result.rows).toEqual([{ id: '1', name: 'Keep original project', asset_id: assetId, request_id: requestId }]);
+      const added = await client.query("INSERT INTO projects (name) VALUES ('New project') RETURNING id");
+      expect(added.rows[0].id).toBe('2');
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
   it('refuses unrelated schemas before writing migration state', async () => {
     await pool.query('CREATE SCHEMA pgarchive');
     try {

@@ -1,6 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDatabase, createPool, runMigrations } from '@print-pantry/db';
 import { createLibraryIndexer, read3mfThumbnailFromHandle } from '@print-pantry/indexer';
@@ -45,8 +44,8 @@ async function login(name: string): Promise<string> {
 
 beforeAll(async () => {
   await runMigrations(url);
-  root = await mkdtemp(path.join(tmpdir(), 'print-pantry-api-'));
-  outside = await mkdtemp(path.join(tmpdir(), 'print-pantry-outside-'));
+  root = await mkdtemp(path.join(process.cwd(), '.print-pantry-api-'));
+  outside = await mkdtemp(path.join(process.cwd(), '.print-pantry-outside-'));
   const projectFolder = path.join(root, rootName, 'Gadgets', 'Desk Lamp');
   await mkdir(path.join(projectFolder, 'files'), { recursive: true });
   await writeFile(path.join(projectFolder, 'files', 'part 02.stl'),
@@ -87,13 +86,13 @@ afterAll(async () => {
       'SELECT id FROM projects WHERE relative_path LIKE $1', [`${rootName}/%`]);
     const ids = projects.rows.map(({ id }) => id);
     if (ids.length) {
-      await pool.query('UPDATE assets SET current_version_id = NULL WHERE project_id = ANY($1::uuid[])', [ids]);
+      await pool.query('UPDATE assets SET current_version_id = NULL WHERE project_id = ANY($1::bigint[])', [ids]);
       await pool.query(
-        'DELETE FROM asset_versions WHERE asset_id IN (SELECT id FROM assets WHERE project_id = ANY($1::uuid[]))',
+        'DELETE FROM asset_versions WHERE asset_id IN (SELECT id FROM assets WHERE project_id = ANY($1::bigint[]))',
         [ids],
       );
-      await pool.query('DELETE FROM assets WHERE project_id = ANY($1::uuid[])', [ids]);
-      await pool.query('DELETE FROM projects WHERE id = ANY($1::uuid[])', [ids]);
+      await pool.query('DELETE FROM assets WHERE project_id = ANY($1::bigint[])', [ids]);
+      await pool.query('DELETE FROM projects WHERE id = ANY($1::bigint[])', [ids]);
     }
     const categories = await pool.query<{ id: string }>(
       'SELECT id FROM categories WHERE relative_path = $1 OR relative_path LIKE $2 ORDER BY length(relative_path) DESC',
@@ -288,6 +287,90 @@ describe('authenticated catalog and local files', () => {
       method: 'GET', url: `/catalog/assets/${assetId}/download?versionId=${versionId}`,
       headers: { cookie: operatorCookie },
     })).statusCode).toBe(410);
+  });
+
+  it('serves managed files and client paths only from managed storage and rejects managed boundary changes', async () => {
+    const managedRoot = path.join(outside, 'managed');
+    const projectPath = `${rootName}/Gadgets/Desk Lamp`;
+    const projectRelativePath = 'models/docs/exports/images/Blue/managed.stl';
+    const relativePath = `${projectPath}/${projectRelativePath}`;
+    const contents = 'solid managed\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 7 0 0\nvertex 0 7 0\nendloop\nendfacet\nendsolid managed';
+    await mkdir(path.dirname(path.join(managedRoot, relativePath)), { recursive: true });
+    await writeFile(path.join(managedRoot, relativePath), contents);
+    await mkdir(path.dirname(path.join(root, relativePath)), { recursive: true });
+    await writeFile(path.join(root, relativePath), 'legacy decoy');
+    const stats = await stat(path.join(managedRoot, relativePath));
+    const managedProject = (await pool.query<{ id: string }>(
+      `INSERT INTO projects (storage_kind, relative_path, name)
+       VALUES ('managed', $1, 'Explicit managed project') RETURNING id`, [projectPath],
+    )).rows[0].id;
+    const managedAsset = randomUUID();
+    const managedVersion = randomUUID();
+    await pool.query(
+      `INSERT INTO assets (id, project_id, storage_kind, relative_path, project_relative_path,
+       name, kind, extension, size_bytes, mtime_ms)
+       VALUES ($1,$2,'managed',$3,$4,'managed.stl','mesh','.stl',$5,$6)`,
+      [managedAsset, managedProject, relativePath, projectRelativePath, stats.size, Math.trunc(stats.mtimeMs)],
+    );
+    await pool.query(
+      `INSERT INTO asset_versions (id, asset_id, content_hash, size_bytes, mtime_ms) VALUES ($1,$2,$3,$4,$5)`,
+      [managedVersion, managedAsset, createHash('sha256').update(contents).digest('hex'), stats.size, Math.trunc(stats.mtimeMs)],
+    );
+    await pool.query('UPDATE assets SET current_version_id = $2 WHERE id = $1', [managedAsset, managedVersion]);
+    const managedServer = buildServer(pool, {
+      pool, root, managedRoot, indexer, secureCookie: false,
+      clientMountPrefix: '/legacy', managedClientMountPrefix: '/managed',
+    });
+    const noPrefixServer = buildServer(pool, {
+      pool, root, managedRoot, indexer, secureCookie: false, clientMountPrefix: '/legacy',
+    });
+    const headers = { cookie: operatorCookie };
+    try {
+      const detail = (await managedServer.inject({ url: `/catalog/projects/${managedProject}`, headers })).json().project;
+      expect(detail).toMatchObject({ storageKind: 'managed', name: 'Explicit managed project', isBoundary: false,
+        clientPath: `/managed/${projectPath}` });
+      expect(detail.files[0]).toMatchObject({ clientPath: `/managed/${relativePath}`, variant: 'Blue' });
+      const withoutPrefix = (await noPrefixServer.inject({ url: `/catalog/projects/${managedProject}`, headers })).json().project;
+      expect(withoutPrefix.clientPath).toBeNull();
+      expect(withoutPrefix.files[0].clientPath).toBeNull();
+      const listing = (await managedServer.inject({ url: '/catalog/projects?q=Explicit%20managed', headers })).json();
+      expect(listing.items.find((item: { id: string }) => item.id === managedProject))
+        .toMatchObject({ storageKind: 'managed', clientPath: `/managed/${projectPath}` });
+      const download = await managedServer.inject({
+        url: `/catalog/assets/${managedAsset}/download?versionId=${managedVersion}`, headers,
+      });
+      expect(download.statusCode).toBe(200);
+      expect(download.body).toBe(contents);
+      expect((await managedServer.inject({ url: `/catalog/assets/${managedAsset}/preview`, headers })).statusCode).toBe(200);
+      expect((await managedServer.inject({ url: `/catalog/projects/${managedProject}/preview`, headers })).statusCode).toBe(200);
+      const geometry = await managedServer.inject({ url: `/catalog/assets/${managedAsset}/geometry`, headers });
+      expect(geometry.statusCode).toBe(200);
+      expect(geometry.json().triangles).toEqual([[[0, 0, 0], [7, 0, 0], [0, 7, 0]]]);
+      for (const isBoundary of [true, false]) {
+        expect((await managedServer.inject({ method: 'PUT', url: '/catalog/boundaries', headers,
+          payload: { projectId: managedProject, isBoundary } })).statusCode).toBe(400);
+      }
+      expect((await pool.query('SELECT * FROM project_boundary_overrides WHERE relative_path = $1', [projectPath])).rows)
+        .toHaveLength(0);
+      expect((await managedServer.inject({ method: 'PUT', url: '/catalog/boundaries', headers,
+        payload: { relativePath: projectPath, kind: 'project' } })).statusCode).toBe(200);
+      expect((await managedServer.inject({ url: `/catalog/projects/${managedProject}`, headers })).json().project.isBoundary)
+        .toBe(false);
+      expect((await managedServer.inject({ url: `/catalog/projects/${projectId}`, headers })).json().project.isBoundary)
+        .toBe(true);
+      expect((await managedServer.inject({ method: 'DELETE', url: '/catalog/boundaries', headers,
+        payload: { relativePath: projectPath } })).statusCode).toBe(204);
+      for (const route of ['download', 'preview', 'geometry']) {
+        expect((await server.inject({ url: `/catalog/assets/${managedAsset}/${route}`, headers })).statusCode).toBe(503);
+      }
+      await rename(managedRoot, `${managedRoot}-offline`);
+      for (const route of ['download', 'preview', 'geometry']) {
+        expect((await managedServer.inject({ url: `/catalog/assets/${managedAsset}/${route}`, headers })).statusCode).toBe(503);
+      }
+    } finally {
+      await managedServer.close();
+      await noPrefixServer.close();
+    }
   });
 
   it('does not treat an offline library root as a missing asset', async () => {

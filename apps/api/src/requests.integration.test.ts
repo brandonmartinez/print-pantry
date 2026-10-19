@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDatabase, createPool, runMigrations } from '@print-pantry/db';
 import { createLibraryIndexer } from '@print-pantry/indexer';
@@ -69,7 +68,7 @@ async function action(id: string, name: string, cookie = operatorCookie, extra: 
 beforeAll(async () => {
   await runMigrations(url);
   await runMigrations(url);
-  root = await mkdtemp(path.join(tmpdir(), 'pp-requests-'));
+  root = await mkdtemp(path.join(process.cwd(), '.pp-requests-'));
   for (const project of ['Desk Lamp', 'Other']) {
     await mkdir(path.join(root, prefix, 'Gadgets', project, 'files'), { recursive: true });
   }
@@ -126,10 +125,10 @@ afterAll(async () => {
       'SELECT id FROM projects WHERE relative_path LIKE $1', [`${prefix}/%`]);
     const ids = projects.rows.map((row) => row.id);
     if (ids.length) {
-      await pool.query('UPDATE assets SET current_version_id = NULL WHERE project_id = ANY($1::uuid[])', [ids]);
-      await pool.query('DELETE FROM asset_versions WHERE asset_id IN (SELECT id FROM assets WHERE project_id = ANY($1::uuid[]))', [ids]);
-      await pool.query('DELETE FROM assets WHERE project_id = ANY($1::uuid[])', [ids]);
-      await pool.query('DELETE FROM projects WHERE id = ANY($1::uuid[])', [ids]);
+      await pool.query('UPDATE assets SET current_version_id = NULL WHERE project_id = ANY($1::bigint[])', [ids]);
+      await pool.query('DELETE FROM asset_versions WHERE asset_id IN (SELECT id FROM assets WHERE project_id = ANY($1::bigint[]))', [ids]);
+      await pool.query('DELETE FROM assets WHERE project_id = ANY($1::bigint[])', [ids]);
+      await pool.query('DELETE FROM projects WHERE id = ANY($1::bigint[])', [ids]);
     }
     const categories = await pool.query<{ id: string }>(
       'SELECT id FROM categories WHERE relative_path = $1 OR relative_path LIKE $2 ORDER BY length(relative_path) DESC',
@@ -335,6 +334,58 @@ describe('request submission and ownership', () => {
         available: false, unavailableReason: 'library_offline', downloadUrl: null,
       });
       expect((await submit()).statusCode).toBe(503);
+    } finally {
+      await rename(offlineRoot, root);
+    }
+  });
+
+  it('allows managed requests and snapshots after an unrelated legacy mount goes offline', async () => {
+    const managedProject = (await pool.query<{ id: string }>(
+      `INSERT INTO projects (storage_kind, relative_path, name)
+       SELECT 'managed', relative_path, 'Explicit managed print project' FROM projects WHERE id = $1 RETURNING id`,
+      [projectId],
+    )).rows[0].id;
+    const managedAsset = randomUUID();
+    const managedVersion = randomUUID();
+    const managedPath = 'models/docs/exports/images/Blue/part.stl';
+    await pool.query(
+      `INSERT INTO assets (id, project_id, storage_kind, relative_path, project_relative_path,
+        name, kind, extension, size_bytes, mtime_ms)
+       SELECT $1,$2,'managed',p.relative_path || '/' || $3,$3,'Managed part','mesh','.stl',10,0
+       FROM projects p WHERE p.id = $2`, [managedAsset, managedProject, managedPath],
+    );
+    await pool.query(
+      `INSERT INTO asset_versions (id, asset_id, content_hash, size_bytes, mtime_ms) VALUES ($1,$2,'managed-hash',10,0)`,
+      [managedVersion, managedAsset],
+    );
+    await pool.query('UPDATE assets SET current_version_id = $2 WHERE id = $1', [managedAsset, managedVersion]);
+    const offlineRoot = `${root}-managed-offline-test`;
+    await rename(root, offlineRoot);
+    try {
+      expect((await scan()).status).toBe('offline');
+      expect((await submit()).statusCode).toBe(503);
+      const created = await submit([{ assetId: managedAsset, versionId: managedVersion }], { projectId: managedProject });
+      expect(created.statusCode).toBe(201);
+      const request = created.json().request;
+      expect(request).toMatchObject({
+        projectName: 'Explicit managed print project',
+        selected: [{ assetId: managedAsset, versionId: managedVersion, variant: 'Blue', available: true,
+          unavailableReason: null, downloadUrl: `/api/catalog/assets/${managedAsset}/download?versionId=${managedVersion}` }],
+      });
+      const detail = await server.inject({ url: `/requests/${request.id}`, headers: { cookie: requesterCookie } });
+      expect(detail.json().request.selected[0].available).toBe(true);
+      expect((await action(request.id, 'approve')).statusCode).toBe(200);
+      const state = await queue();
+      expect(state.items.find((item: { id: string }) => item.id === request.id).selected[0].available).toBe(true);
+      expect((await submit([{ assetId: managedAsset, versionId: randomUUID() }], { projectId: managedProject })).statusCode)
+        .toBe(410);
+      await pool.query('UPDATE assets SET storage_kind = $2 WHERE id = $1', [managedAsset, 'legacy']);
+      const legacySnapshot = (await server.inject({
+        url: `/requests/${request.id}`, headers: { cookie: requesterCookie },
+      })).json().request.selected[0];
+      expect(legacySnapshot).toMatchObject({ available: false, unavailableReason: 'library_offline' });
+      expect((await submit([{ assetId: managedAsset, versionId: managedVersion }], { projectId: managedProject })).statusCode)
+        .toBe(503);
     } finally {
       await rename(offlineRoot, root);
     }

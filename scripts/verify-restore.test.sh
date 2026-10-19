@@ -27,7 +27,7 @@ docker exec "$container" createdb -U postgres print_pantry_restore_source_fixtur
   fail "Could not create the isolated source database."
 for migration in "$script_dir"/../packages/db/drizzle/[0-9]*.sql; do
   docker exec "$container" psql -X -q -v ON_ERROR_STOP=1 -U postgres \
-    -d print_pantry_restore_source_fixture -f "/migrations/$(basename "$migration")" >/dev/null ||
+    -d print_pantry_restore_source_fixture --single-transaction -f "/migrations/$(basename "$migration")" >/dev/null ||
     fail "Migration fixture failed: $(basename "$migration")."
 done
 docker exec "$container" psql -X -q -v ON_ERROR_STOP=1 -U postgres \
@@ -74,8 +74,8 @@ DO $$
 BEGIN
   IF (SELECT value FROM app_metadata WHERE key = 'library_fixture') IS DISTINCT FROM 'synthetic-catalog-v1'
     OR (SELECT name FROM categories WHERE id = '00000000-0000-4000-8000-000000000001') IS DISTINCT FROM 'Gadgets'
-    OR (SELECT notes FROM projects WHERE id = '00000000-0000-4000-8000-000000000002') IS DISTINCT FROM 'Keep this note'
-    OR (SELECT tags FROM projects WHERE id = '00000000-0000-4000-8000-000000000002') IS DISTINCT FROM ARRAY['fixture', 'lamp']
+    OR (SELECT notes FROM projects WHERE id = 1) IS DISTINCT FROM 'Keep this note'
+    OR (SELECT tags FROM projects WHERE id = 1) IS DISTINCT FROM ARRAY['fixture', 'lamp']
     OR (SELECT kind FROM project_boundary_overrides WHERE relative_path = 'Synthetic/Gadgets/Lamp') IS DISTINCT FROM 'project'
     OR (SELECT count(*) FROM asset_versions) IS DISTINCT FROM 2
     OR (SELECT v.content_hash FROM assets a JOIN asset_versions v ON v.id = a.current_version_id) IS DISTINCT FROM 'fixture-hash-v2'

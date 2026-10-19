@@ -1,6 +1,16 @@
 # Import and library management plan
 
-Status: proposed for review; no application implementation approved yet.
+Status: approved direction; implementation in progress.
+
+Implemented checkpoints include bigint project IDs, the household/operator URL
+submission queue, manual file/ZIP intake, deterministic organization, editable
+review, retained originals, and recoverable managed publication. See
+[the checkpoint guide](import-queue.md) for testing, limits, and recovery.
+Operations are request-driven with persisted states and database locks, not
+background workers. Publication verifies its complete inventory; periodic
+managed-root drift reconciliation is not implemented yet. Legacy shortcut
+source discovery, optional AI organization, and library migration remain
+subsequent phases. No existing folders have been moved.
 
 ## Recommendation
 
@@ -14,8 +24,8 @@ queue. Operators acquire files manually, prepare an intake folder, upload
 files/ZIP, then process and review the import. Accept any website from day one;
 known-site identity extraction enhances intake without gating it.
 
-The first usable release should include complete deterministic organization
-and optional OpenAI-assisted organization. Automatic site downloads are a
+The manual-import checkpoint provides deterministic organization first;
+optional OpenAI-assisted suggestions remain a follow-up. Automatic site downloads are a
 separate capability: neither blocked downloads nor missing AI credentials
 should prevent importing files the operator already has.
 
@@ -423,11 +433,12 @@ This decision concerns project IDs, not a blanket conversion of account,
 session, asset, version, or job identities. Those can retain UUIDs unless a
 separate requirement justifies changing them.
 
-Plan a coordinated schema transition and explicitly scoped development database
-reset/reseed during implementation. This is not an instruction to wipe databases
-now. Verify the disposable target and obtain explicit execution approval before
-resetting; never reset an external/shared database or delete library files.
-Filesystem migration after the schema transition preserves the new project IDs.
+Use a coordinated schema transition that maps existing project UUIDs and their
+foreign keys to numeric IDs without deleting records. The first checkpoint
+implements this data-preserving migration, so a reset/reseed is unnecessary.
+Any future reset would require a verified disposable target and explicit
+execution approval; never reset an external/shared database or delete library
+files. Filesystem migration after the schema transition preserves the new IDs.
 
 Make storage roots and project locations explicit database concepts, distinct
 from logical categories. Adapt existing unique path constraints, download and

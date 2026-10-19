@@ -1,3 +1,11 @@
+export const projectIdPattern = '^[1-9][0-9]{0,18}$';
+export const maximumProjectId = '9223372036854775807';
+
+export function isProjectId(value: string): boolean {
+  return new RegExp(projectIdPattern).test(value) &&
+    (value.length < maximumProjectId.length || value <= maximumProjectId);
+}
+
 export interface HealthResponse {
   status: 'ok';
 }
@@ -147,4 +155,108 @@ export interface PrintRequestQueue {
   revision: number;
   selectedNextId: string | null;
   items: PrintRequestSummary[];
+}
+
+export type ImportStatus = 'submitted' | 'awaiting_files' | 'ready_for_review' |
+  'publishing' | 'catalog_pending' | 'imported' | 'declined' | 'canceled';
+
+export interface ImportMetadata {
+  name: string;
+  category: string | null;
+  description: string | null;
+  designer: string | null;
+  license: string | null;
+  notes: string | null;
+  tags: string[];
+}
+
+export interface ImportPlanFile {
+  id: string;
+  versionId: string;
+  originalPath: string;
+  path: string;
+  size: number;
+  hash: string;
+  kind: CatalogFile['fileType'];
+  include: boolean;
+}
+
+export interface ImportPlan {
+  schemaVersion: 1;
+  metadata: ImportMetadata;
+  files: ImportPlanFile[];
+  warnings: string[];
+  duplicates: Array<{ projectId: string; name: string; matchingFiles: number }>;
+}
+
+export interface ImportIntake {
+  configured: boolean;
+  prepared: boolean;
+  uploads: Array<{ id: string; name: string; size: number; fileCount: number }>;
+  plan: ImportPlan | null;
+  lastError: string | null;
+  publishedPath: string | null;
+}
+
+export interface ImportIntakeResult {
+  intake: ImportIntake;
+  revision: number;
+  projectId?: string;
+}
+
+export interface ImportSource {
+  url: string;
+  canonicalUrl: string;
+  key: string;
+  provider: 'makerworld' | 'thingiverse' | 'printables' | 'thangs' | 'other';
+  modelId: string | null;
+  profileId: string | null;
+}
+
+export interface ImportSubmission {
+  id: string;
+  requester: HouseholdUser;
+  sourceUrl: string;
+  title: string | null;
+  notes: string | null;
+  createdAt: string;
+}
+
+export interface ImportRequest {
+  id: string;
+  source: ImportSource;
+  title: string | null;
+  status: ImportStatus;
+  revision: number;
+  projectId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  submissions: ImportSubmission[];
+  history: Array<{
+    id: string;
+    actor: HouseholdUser;
+    status: ImportStatus;
+    note: string | null;
+    createdAt: string;
+  }>;
+}
+
+export interface ImportMatch {
+  source: ImportSource;
+  projects: Array<{ id: string; name: string; available: boolean }>;
+  pending: { id: string; status: ImportStatus } | null;
+}
+
+export interface ImportPage {
+  items: ImportRequest[];
+  page: number;
+  pageSize: number;
+  total: number;
+}
+
+export interface SubmitImport {
+  url: string;
+  title?: string;
+  notes?: string;
+  submissionKey: string;
 }

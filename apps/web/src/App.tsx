@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserRouter, Link, matchPath, useLocation, useNavigate } from 'react-router-dom';
 import type { MeshGeometry, Point3D, Triangle } from './MeshViewer.js';
+import { ImportQueue } from './ImportQueue.js';
 
 type User = { id: string; username: string; role: 'operator' | 'member' | string };
 type Scan = {
@@ -53,6 +54,7 @@ type RequestResponse = { request: PrintRequest };
 type QueueResponse = { items: PrintRequest[]; revision: number; selectedNextId?: string | null };
 type Project = {
   id: string;
+  storageKind?: 'managed' | 'legacy';
   name: string;
   category?: string | null;
   subcategory?: string | null;
@@ -950,7 +952,7 @@ function ProjectDetail({
   }
 
   async function toggleBoundary() {
-    if (!project) return;
+    if (!project || project.storageKind === 'managed') return;
     setActionBusy(true);
     setActionError('');
     setActionMessage('');
@@ -1001,9 +1003,9 @@ function ProjectDetail({
             <button className="button button-quiet" disabled={actionBusy} onClick={() => setEditing((value) => !value)} type="button">
               {editing ? 'Close editor' : 'Edit metadata'}
             </button>
-            <button className="button button-quiet" disabled={actionBusy} onClick={() => void toggleBoundary()} type="button">
+            {project.storageKind !== 'managed' && <button className="button button-quiet" disabled={actionBusy} onClick={() => void toggleBoundary()} type="button">
               {project.isBoundary ? 'Remove boundary override' : 'Set project boundary'}
-            </button>
+            </button>}
           </div>
         )}
       </div>
@@ -1089,7 +1091,7 @@ function RoutedApp() {
   const navigate = useNavigate();
   const projectMatch = matchPath('/projects/:projectId', location.pathname);
   const selectedProjectId = projectMatch?.params.projectId ?? null;
-  const activeView = location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
+  const activeView = location.pathname === '/imports' ? 'imports' : location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
@@ -1129,7 +1131,7 @@ function RoutedApp() {
   }, []);
 
   useEffect(() => {
-    const knownPath = location.pathname === '/' || location.pathname === '/requests' || location.pathname === '/queue'
+    const knownPath = location.pathname === '/' || location.pathname === '/requests' || location.pathname === '/queue' || location.pathname === '/imports'
       || Boolean(projectMatch);
     if (!knownPath) navigate('/', { replace: true });
   }, [location.pathname, navigate, projectMatch]);
@@ -1261,6 +1263,7 @@ function RoutedApp() {
         <nav className="topbar-nav" aria-label="Main navigation">
           <Link className={activeView === 'library' ? 'nav-link active' : 'nav-link'} to="/">Library</Link>
           <Link className={activeView === 'requests' ? 'nav-link active' : 'nav-link'} to={user.role === 'operator' ? '/queue' : '/requests'}>{user.role === 'operator' ? 'Queue' : 'Requests'}</Link>
+          <Link className={activeView === 'imports' ? 'nav-link active' : 'nav-link'} aria-current={activeView === 'imports' ? 'page' : undefined} to="/imports">Imports</Link>
         </nav>
         <div className="account-menu">
           <span className="user-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
@@ -1272,7 +1275,9 @@ function RoutedApp() {
       {authError && <div className="global-notice notice-error" role="alert">{authError}</div>}
       {connectionError && <div className="global-notice notice-error" role="alert">{connectionError}</div>}
 
-      {activeView === 'requests'
+      {activeView === 'imports'
+        ? <ImportQueue user={user} />
+        : activeView === 'requests'
         ? <RequestsPage user={user} />
         : selectedProjectId
         ? <main className="content-wrap">
@@ -1305,6 +1310,7 @@ function RoutedApp() {
                 <h2 id="catalog-heading">Browse projects</h2>
               </div>
               <div className="catalog-actions">
+                <Link className="button button-primary" to="/imports#add">Add New Print</Link>
                 <ScanBadge scan={scan} />
                 {user.role === 'operator' && (
                   <button className="button button-outline" disabled={rescanBusy} onClick={() => void rescan()} type="button">
