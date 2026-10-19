@@ -76,6 +76,17 @@ export const importIntakes = pgTable('import_intakes', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const sourceDiscoveryPreviews = pgTable('source_discovery_previews', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: projectIdType('project_id').notNull().references(() => projects.id),
+  createdBy: uuid('created_by').notNull().references(() => users.id),
+  snapshot: jsonb('snapshot').notNull(),
+  approvedCandidateIds: jsonb('approved_candidate_ids').$type<string[]>(),
+  appliedBy: uuid('applied_by').references(() => users.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  appliedAt: timestamp('applied_at', { withTimezone: true }),
+}, (table) => [index('source_discovery_project_idx').on(table.projectId)]);
+
 export const importUploads = pgTable('import_uploads', {
   id: uuid('id').primaryKey(),
   requestId: uuid('request_id').notNull().references(() => importIntakes.requestId),

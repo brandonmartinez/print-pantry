@@ -1,5 +1,27 @@
 import { crc32, deflateRawSync } from 'node:zlib';
 
+export function binaryWebloc(url: string, key = 'URL'): Buffer {
+  function string(value: string) {
+    const unicode = [...value].some((character) => character.charCodeAt(0) > 127);
+    const data = unicode ? Buffer.from(value, 'utf16le').swap16() : Buffer.from(value);
+    return Buffer.concat([Buffer.from(value.length < 15
+      ? [(unicode ? 0x60 : 0x50) | value.length]
+      : [unicode ? 0x6f : 0x5f, 0x10, value.length]), data]);
+  }
+  const objects = [Buffer.from([0xd1, 1, 2]), string(key), string(url)];
+  const offsets: number[] = [];
+  let size = 8;
+  for (const data of objects) { offsets.push(size); size += data.length; }
+  const table = Buffer.alloc(objects.length * 2);
+  offsets.forEach((offset, index) => table.writeUInt16BE(offset, index * 2));
+  const trailer = Buffer.alloc(32);
+  trailer[6] = 2;
+  trailer[7] = 1;
+  trailer.writeBigUInt64BE(BigInt(objects.length), 8);
+  trailer.writeBigUInt64BE(BigInt(size), 24);
+  return Buffer.concat([Buffer.from('bplist00'), ...objects, table, trailer]);
+}
+
 export function fixtureZip(entries: Array<{ name: string; bytes: Buffer; mode?: number; badCrc?: boolean; compressed?: boolean }>) {
   const locals: Buffer[] = [];
   const central: Buffer[] = [];

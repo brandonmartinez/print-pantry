@@ -9,7 +9,9 @@ review, retained originals, and recoverable managed publication. See
 Operations are request-driven with persisted states and database locks, not
 background workers. Publication verifies its complete inventory; periodic
 managed-root drift reconciliation is not implemented yet. Legacy shortcut
-source discovery, optional AI organization, and library migration remain
+source recovery now supports per-project, operator-run discovery previews and
+approved source-association backfill, including XML/binary macOS shortcuts.
+Bulk discovery, optional AI organization, and library migration remain
 subsequent phases. No existing folders have been moved.
 
 ## Recommendation

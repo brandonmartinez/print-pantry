@@ -57,7 +57,7 @@ admin_identity="$(query_admin "SELECT coalesce(inet_server_addr()::text, 'local'
 tables=(app_metadata categories projects project_boundary_overrides assets asset_versions
   scan_runs scan_errors users sessions print_requests print_request_files
   print_request_history request_queue_state import_requests import_submissions
-  import_events project_sources import_intakes import_uploads import_files)
+  import_events project_sources import_intakes import_uploads import_files source_discovery_previews)
 for table in "${tables[@]}"; do
   [[ "$(query_source "SELECT to_regclass('public.$table') IS NOT NULL")" == t ]] ||
     fail "Source is missing public.$table; apply application migrations before backing up."

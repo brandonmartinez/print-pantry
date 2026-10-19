@@ -158,6 +158,13 @@ Project IDs are now database-generated bigint values represented as decimal
 strings in APIs. Versioned migrations preserve catalog records and existing
 print-request references; existing folders are not renamed.
 
+Operators can also open **Manage sources** on a project, discover URLs from its
+existing catalog value and indexed shortcuts/metadata, and approve selected
+source associations for duplicate detection. Discovery is offline and read-only
+for files. It does not change the project's display source URL or other metadata.
+See [source recovery](docs/import-queue.md#existing-project-source-recovery) for
+the approval workflow and limits.
+
 ## Print requests and operator queue
 
 Sign in as a requester or operator, open a project, and explicitly select the

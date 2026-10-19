@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserRouter, Link, matchPath, useLocation, useNavigate } from 'react-router-dom';
 import type { MeshGeometry, Point3D, Triangle } from './MeshViewer.js';
 import { ImportQueue } from './ImportQueue.js';
+import { SourceDiscovery } from './SourceDiscovery.js';
 
 type User = { id: string; username: string; role: 'operator' | 'member' | string };
 type Scan = {
@@ -1017,6 +1018,7 @@ function ProjectDetail({
       {editing && isOperator && (
         <MetadataEditor project={project} onSave={saveMetadata} busy={actionBusy} onCancel={() => setEditing(false)} />
       )}
+      {isOperator && <SourceDiscovery key={project.id} projectId={project.id} request={apiRequest} />}
 
       <div className="detail-layout">
         <div className="detail-main">

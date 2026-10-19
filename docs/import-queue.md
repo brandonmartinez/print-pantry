@@ -206,13 +206,57 @@ publication starts.
 
 Existing-source lookup covers structured source associations and legacy
 `projects.sourceUrl` values, including recognized MakerWorld/Thingiverse/
-Printables URL variations. Discovering URLs in `.webloc`, `.url`, and legacy
-organizer files is still a subsequent phase; this release does not claim that
-unprocessed legacy shortcuts participate in duplicate detection.
+Printables URL variations. Unprocessed shortcuts do not participate until an operator discovers and
+approves their source associations as described below.
+
+## Existing-project source recovery
+
+As an operator, open a project and choose **Manage sources**, then **Discover
+existing sources**. This inspects the existing catalog source URL and indexed
+`.webloc`, `.url`, `project.json`, `metadata.json`, and `agentic-plan.json`
+assets belonging to that project. Nested variants use catalog ownership, not
+a guessed directory depth. Index new shortcuts before discovery.
+
+XML and binary `.webloc` `URL`/`URLString` fields work without macOS tools.
+Windows InternetShortcut files support UTF-8 and UTF-16. Recognized JSON source
+fields include `sourceUrl`, `source_url`, managed `source.url`, and the legacy
+organizer's `files[].sourceUrl`. Arbitrary README/HTML links are not treated
+as sources. OS metadata/resource forks are skipped.
+
+Nothing is fetched from websites and no library files are changed. Review
+candidate URLs, model/profile evidence, malformed/unavailable sidecars, and
+conflicting model identities. Profiles of the same model are grouped while
+retaining their separate URLs and profile IDs in the evidence. Nothing is
+selected automatically. Select only verified candidates and choose **Approve
+selected associations**. Approved associations immediately participate in
+new-import duplicate checks; projects are never automatically merged.
+
+Discovery previews and approvals persist in PostgreSQL, including provenance
+and evidence hashes. Reopening **Manage sources** restores the latest preview.
+Approval rechecks catalog ownership and selected sidecar bytes; a stale preview
+returns conflict and requires rediscovery. Repeating the same approval is
+idempotent; changing an already-approved selection requires a new preview.
+Already-associated sources are shown without overwriting their earlier
+provenance. All scalar metadata, including a null display source URL, stays
+unchanged. Use the existing metadata editor to choose a display URL explicitly.
+
+The per-project checkpoint inspects at most the first 100 indexed sidecar
+records, 128 KiB per file, 256 URL fields, and 128 distinct source candidates.
+Truncation is reported as a partial preview, not a claim of complete coverage.
+Binary parsing bounds the object table and reads only root URL strings;
+XML nesting is bounded and entity declarations/internal DTDs are rejected.
+Bulk-library discovery and automatic approval are not implemented.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/catalog/projects/:projectId/source-discovery` | Operator discovery and persisted preview |
+| `GET /api/catalog/projects/:projectId/source-discovery` | Operator latest preview, including approval state |
+| `GET /api/catalog/projects/:projectId/source-discovery/:previewId` | Operator persisted preview |
+| `POST /api/catalog/projects/:projectId/source-discovery/:previewId/apply` | Operator explicit `candidateIds` approval, with evidence revalidation |
 
 ## Subsequent checkpoints
 
-1. Legacy source discovery/approval and periodic managed-root reconciliation.
+1. Bulk source discovery and periodic managed-root reconciliation.
 2. Optional OpenAI-assisted suggestions with explicit privacy/budget controls;
    deterministic organization continues to work without a provider.
 3. Library management and copy/verify/activate migration. Test a small synthetic

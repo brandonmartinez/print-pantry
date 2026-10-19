@@ -9,6 +9,7 @@ import * as yauzl from 'yauzl';
 import type { ImportPlanFile } from '@print-pantry/contracts';
 import { classifyLibraryExtension } from '@print-pantry/indexer';
 import { openLibraryFile, validateRelativePath } from './files.js';
+import { isOsMetadata } from './os-metadata.js';
 
 export const importLimits = {
   uploadBytes: 256 * 1024 * 1024,
@@ -225,22 +226,6 @@ async function expandUpload(stream: Readable, root: string, name: string, batch:
     if (!files.length) throw new IntakeError('ZIP contains no files');
   }
   return { original: { path: originalPath, hash: original.hash, size: original.size }, files };
-}
-
-const osMetadataFiles = new Set([
-  '.ds_store', 'thumbs.db', 'ehthumbs.db', 'ehthumbs_vista.db', 'desktop.ini',
-  '.directory', '.apdisk', '.lsoverride', '.volumeicon.icns',
-]);
-const osMetadataDirectories = new Set([
-  '__macosx', '.appledouble', '.spotlight-v100', '.trashes', '.fseventsd',
-  '.temporaryitems', '$recycle.bin', 'system volume information',
-]);
-
-function isOsMetadata(path: string): boolean {
-  const parts = path.toLowerCase().split('/');
-  const name = parts.at(-1)!;
-  return osMetadataFiles.has(name) || name.startsWith('._') ||
-    parts.some((part) => osMetadataDirectories.has(part) || /^\.trash(?:-\d+)?$/.test(part));
 }
 
 export function organizeFiles(files: StoredFile[]): { files: ImportPlanFile[]; warnings: string[] } {

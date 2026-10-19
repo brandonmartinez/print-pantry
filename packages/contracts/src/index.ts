@@ -10,6 +10,25 @@ export interface HealthResponse {
   status: 'ok';
 }
 
+export interface SourceDiscoveryCandidate {
+  id: string;
+  source: ImportSource;
+  alreadyAssociated: boolean;
+  conflicting: boolean;
+  evidence: Array<{ relativePath: string | null; url: string; profileId: string | null; hash: string | null }>;
+}
+
+export interface SourceDiscoveryPreview {
+  id: string;
+  projectId: string;
+  projectName: string;
+  candidates: SourceDiscoveryCandidate[];
+  issues: Array<{ relativePath: string | null; message: string }>;
+  createdAt: string;
+  appliedAt: string | null;
+  approvedCandidateIds: string[];
+}
+
 export interface ReadinessResponse {
   status: 'ready' | 'unavailable';
 }
