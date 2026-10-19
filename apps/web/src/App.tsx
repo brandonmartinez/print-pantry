@@ -3,6 +3,7 @@ import { BrowserRouter, Link, matchPath, useLocation, useNavigate } from 'react-
 import type { MeshGeometry, Point3D, Triangle } from './MeshViewer.js';
 import { ImportQueue } from './ImportQueue.js';
 import { SourceDiscovery } from './SourceDiscovery.js';
+import { LibraryManagement } from './LibraryManagement.js';
 
 type User = { id: string; username: string; role: 'operator' | 'member' | string };
 type Scan = {
@@ -1093,7 +1094,7 @@ function RoutedApp() {
   const navigate = useNavigate();
   const projectMatch = matchPath('/projects/:projectId', location.pathname);
   const selectedProjectId = projectMatch?.params.projectId ?? null;
-  const activeView = location.pathname === '/imports' ? 'imports' : location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
+  const activeView = location.pathname === '/manage-library' ? 'management' : location.pathname === '/imports' ? 'imports' : location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
@@ -1133,7 +1134,7 @@ function RoutedApp() {
   }, []);
 
   useEffect(() => {
-    const knownPath = location.pathname === '/' || location.pathname === '/requests' || location.pathname === '/queue' || location.pathname === '/imports'
+    const knownPath = location.pathname === '/' || location.pathname === '/requests' || location.pathname === '/queue' || location.pathname === '/imports' || location.pathname === '/manage-library'
       || Boolean(projectMatch);
     if (!knownPath) navigate('/', { replace: true });
   }, [location.pathname, navigate, projectMatch]);
@@ -1266,6 +1267,8 @@ function RoutedApp() {
           <Link className={activeView === 'library' ? 'nav-link active' : 'nav-link'} to="/">Library</Link>
           <Link className={activeView === 'requests' ? 'nav-link active' : 'nav-link'} to={user.role === 'operator' ? '/queue' : '/requests'}>{user.role === 'operator' ? 'Queue' : 'Requests'}</Link>
           <Link className={activeView === 'imports' ? 'nav-link active' : 'nav-link'} aria-current={activeView === 'imports' ? 'page' : undefined} to="/imports">Imports</Link>
+          {user.role === 'operator' && <Link className={activeView === 'management' ? 'nav-link active' : 'nav-link'}
+            aria-current={activeView === 'management' ? 'page' : undefined} to="/manage-library">Manage library</Link>}
         </nav>
         <div className="account-menu">
           <span className="user-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
@@ -1277,7 +1280,9 @@ function RoutedApp() {
       {authError && <div className="global-notice notice-error" role="alert">{authError}</div>}
       {connectionError && <div className="global-notice notice-error" role="alert">{connectionError}</div>}
 
-      {activeView === 'imports'
+      {activeView === 'management'
+        ? user.role === 'operator' ? <LibraryManagement request={apiRequest} /> : <main className="content-wrap"><p className="notice notice-error" role="alert">Library management requires operator access.</p><Link to="/">Back to library</Link></main>
+        : activeView === 'imports'
         ? <ImportQueue user={user} />
         : activeView === 'requests'
         ? <RequestsPage user={user} />

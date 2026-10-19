@@ -87,6 +87,13 @@ export const sourceDiscoveryPreviews = pgTable('source_discovery_previews', {
   appliedAt: timestamp('applied_at', { withTimezone: true }),
 }, (table) => [index('source_discovery_project_idx').on(table.projectId)]);
 
+export const libraryReorganizationPlans = pgTable('library_reorganization_plans', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  createdBy: uuid('created_by').notNull().references(() => users.id),
+  snapshot: jsonb('snapshot').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [index('library_reorganization_created_idx').on(table.createdAt)]);
+
 export const importUploads = pgTable('import_uploads', {
   id: uuid('id').primaryKey(),
   requestId: uuid('request_id').notNull().references(() => importIntakes.requestId),

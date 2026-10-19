@@ -254,12 +254,79 @@ Bulk-library discovery and automatic approval are not implemented.
 | `GET /api/catalog/projects/:projectId/source-discovery/:previewId` | Operator persisted preview |
 | `POST /api/catalog/projects/:projectId/source-discovery/:previewId/apply` | Operator explicit `candidateIds` approval, with evidence revalidation |
 
+## Library management: read-only reorganization preview
+
+Operators can open **Manage library** from the main navigation. The paginated
+inventory distinguishes legacy and managed projects, shows catalog availability,
+classification, file counts, and indexed bytes, and links to project metadata
+and source recovery. Opening the screen does not scan the filesystem.
+
+Select a small batch of legacy projects and choose **Preview reorganization**.
+This saves a PostgreSQL snapshot, not a migration approval. The preview shows
+legacy and proposed `projects/<existing-id>-<snake_case_title>` paths, exact
+decimal-string byte estimates, available destination space, file/asset/version
+mappings, and preserved metadata. Existing categories and source associations
+remain in place; changing classification does not imply moving files. Internal
+filenames, variants, linked resources, and empty directories retain their
+relative layout rather than being reorganized by extension.
+
+Inspection is explicitly limited to 25 projects, 1,000 indexed files,
+2,000 filesystem entries across the batch (including existing managed
+destination directory entries), 12 relative-path components, and an 8 MiB saved
+snapshot. Split a batch when limits are reported. No destination directories
+are created. Current directory entries and descriptor-based file stats are
+checked against indexed ownership, sizes, timestamps, and available inode/device
+evidence. Hashes come from indexed versions: this phase does **not** rehash file
+contents, copy files, or verify a new copy. Stat checks cannot detect every
+content change, especially changes that preserve timestamps and sizes.
+
+Blockers include unavailable storage, absent/inconsistent versions, missing or
+changed files, unindexed non-OS files, unsafe/nonportable paths, reserved root
+`project.json`, symlinks/special entries, case/Unicode collisions, overlapping
+catalog boundaries, occupied destinations, and insufficient known free space.
+Unknown files are not silently omitted. Unindexed OS metadata is ignored and
+left in the retained legacy copy; already-indexed assets keep their mappings.
+Missing approved sources produce a source-recovery warning. A running local
+scan rejects planning; snapshots still require fresh verification before any
+future activation.
+
+Additional bytes are a **lower bound**, excluding manifest, staging, and
+filesystem overhead. Originals remain in place and require extra storage;
+retained copies are not independent backups. Project metadata, IDs, sources,
+versions, and print-request snapshots are not modified.
+
+The ten latest dry runs are listed for reopening after reload; a selected
+snapshot is also bookmarkable through `/manage-library?plan=<id>`. Snapshots
+are immutable historical previews, not live readiness guarantees. Generate a
+new dry run after resolving blockers or changing files/metadata.
+
+### Test this checkpoint
+
+1. Use a small **synthetic** indexed legacy project first; approve its source
+   through **Manage sources** if applicable.
+2. Open **Manage library**, select it, and generate a preview.
+3. Review old/new paths, metadata, file mappings, checked-file counts, blockers,
+   and space estimates. Managed projects cannot be selected through the UI.
+4. Reload or reopen the saved URL; the snapshot should persist.
+5. Confirm files remain in their original location and existing downloads and
+   print requests still work. There is intentionally no migration/activation
+   button in this checkpoint.
+
+All routes below are operator-only:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/library/management?q=&page=1` | 50-project catalog page, summary counts, ten recent plans |
+| `POST /api/library/reorganization-plans` | Save a dry run for explicit `projectIds` |
+| `GET /api/library/reorganization-plans/:id` | Reopen an immutable saved dry run |
+
 ## Subsequent checkpoints
 
 1. Bulk source discovery and periodic managed-root reconciliation.
 2. Optional OpenAI-assisted suggestions with explicit privacy/budget controls;
    deterministic organization continues to work without a provider.
-3. Library management and copy/verify/activate migration. Test a small synthetic
+3. Collections/metadata management and copy/verify/activate migration with
+   recovery. The current dry run does not activate it. Test a small synthetic
    library before approving any real-library reorganization.
 
 Automatic site acquisition remains a separate adapter capability; this

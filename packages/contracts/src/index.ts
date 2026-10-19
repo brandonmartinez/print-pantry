@@ -29,6 +29,70 @@ export interface SourceDiscoveryPreview {
   approvedCandidateIds: string[];
 }
 
+export interface LibraryManagementProject {
+  id: string;
+  name: string;
+  storageKind: 'legacy' | 'managed';
+  relativePath: string;
+  category: string | null;
+  available: boolean;
+  fileCount: number;
+  sizeBytes: string;
+  sourceCount: number;
+}
+
+export interface LibraryPlanIssue {
+  severity: 'blocker' | 'warning';
+  code: string;
+  relativePath: string | null;
+  message: string;
+}
+
+export interface LibraryReorganizationProject extends LibraryManagementProject {
+  destinationPath: string;
+  metadata: {
+    categoryId: string | null;
+    description: string | null;
+    tags: string[];
+    designer: string | null;
+    sourceUrl: string | null;
+    license: string | null;
+    notes: string | null;
+  };
+  files: Array<{
+    id: string;
+    versionId: string | null;
+    sourcePath: string;
+    destinationPath: string;
+    contentHash: string | null;
+    sizeBytes: string;
+  }>;
+  directories: string[];
+  checkedFiles: number;
+  inspectionComplete: boolean;
+  issues: LibraryPlanIssue[];
+}
+
+export interface LibraryReorganizationPlan {
+  id: string;
+  createdAt: string;
+  kind: 'dry_run';
+  fingerprint: string;
+  projects: LibraryReorganizationProject[];
+  additionalBytes: string;
+  availableBytes: string | null;
+  issues: LibraryPlanIssue[];
+}
+
+export interface LibraryManagementResponse {
+  items: LibraryManagementProject[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: { legacy: number; managed: number; missing: number };
+  plans: Array<{ id: string; createdAt: string; projectCount: number }>;
+}
+
 export interface ReadinessResponse {
   status: 'ready' | 'unavailable';
 }

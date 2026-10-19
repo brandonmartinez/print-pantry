@@ -11,8 +11,13 @@ background workers. Publication verifies its complete inventory; periodic
 managed-root drift reconciliation is not implemented yet. Legacy shortcut
 source recovery now supports per-project, operator-run discovery previews and
 approved source-association backfill, including XML/binary macOS shortcuts.
-Bulk discovery, optional AI organization, and library migration remain
-subsequent phases. No existing folders have been moved.
+The operator Manage library checkpoint now provides paginated storage inventory
+and saved, read-only reorganization dry runs with proposed ID-based paths,
+preserved internal layout, indexed hashes, space estimates, and filesystem
+blockers. It does not authorize or execute migration. Bulk source discovery,
+optional AI organization, copy/verify/activate migration, collections, and
+managed reconciliation remain subsequent phases. No existing folders have
+been moved.
 
 ## Recommendation
 

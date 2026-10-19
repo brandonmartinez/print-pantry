@@ -59,6 +59,12 @@ before forwarding to Fastify.
 
 ## Library catalog and household access
 
+Operators can use **Manage library** for paginated legacy/managed inventory and
+saved reorganization dry runs. Previews preserve existing project IDs and
+internal file layout, flag filesystem/storage blockers, and do not move or
+activate files. See the [library preview testing checkpoint](docs/import-queue.md#library-management-read-only-reorganization-preview)
+before proceeding with library adoption.
+
 Mount the library **read-only** at `LIBRARY_ROOT` (the development container
 uses `/mnt/library`). Point `LIBRARY_HOST_PATH` at a **test library only** while
 developing; do not test against the NAS. `CLIENT_MOUNT_PREFIX` is a separate,

@@ -7,6 +7,7 @@ import { registerImports } from './imports.js';
 import { registerImportIntake } from './import-intake.js';
 import type { ImportStorage } from './import-storage.js';
 import { registerSourceDiscovery } from './source-discovery.js';
+import { registerLibraryManagement } from './library-management.js';
 
 export function buildServer(
   pool: { query(sql: string): Promise<unknown> },
@@ -45,6 +46,7 @@ export function buildServer(
     registerImports(server, catalog.pool, auth);
     registerImportIntake(server, catalog.pool, auth, catalog.root, catalog.importStorage);
     registerSourceDiscovery(server, catalog.pool, auth, catalog);
+    registerLibraryManagement(server, catalog.pool, auth, catalog);
   }
 
   return server;

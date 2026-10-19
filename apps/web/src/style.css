@@ -629,18 +629,19 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .scan-card .scan-badge { margin-top: .75rem; }
 
 @media (max-width: 1000px) {
+  .topbar-nav { gap: 1rem; margin-left: 1.5rem; }
   .project-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .detail-layout { grid-template-columns: minmax(0, 1fr) 270px; }
   .hero-art { right: -6%; width: 48%; opacity: .8; }
 }
 
 @media (max-width: 760px) {
-  .topbar { height: 65px; padding-inline: 1rem; }
+  .topbar { height: auto; min-height: 65px; padding-inline: 1rem; flex-wrap: wrap; }
   .brand { font-size: 1.03rem; }
   .brand-mark { width: 28px; height: 28px; }
-  .topbar-nav { gap: .9rem; margin-left: auto; }
+  .topbar-nav { gap: .9rem; margin-left: 0; order: 3; width: 100%; height: 44px; }
   .topbar-nav .nav-link { font-size: .73rem; }
-  .account-menu { gap: .45rem; margin-left: 1rem; }
+  .account-menu { gap: .45rem; margin-left: auto; }
   .account-name { display: none; }
   .signout-button { padding-inline: .45rem; }
   .content-wrap { width: calc(100% - 2rem); }
@@ -712,3 +713,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+.library-management { padding-bottom: 3rem; }
+.library-management .queue-panel { margin-top: 1.5rem; }
+.library-management-summary { font-weight: 600; }
+.library-management-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin: 1rem 0; }
+.library-management-projects, .library-file-mappings, .library-plan-issues { list-style: none; padding: 0; }
+.library-management-projects > li, .library-plan-project { border-top: 1px solid var(--line); padding: 1rem 0; }
+.library-storage-path { display: block; overflow-wrap: anywhere; margin: .4rem 0; }
+.library-plan-issues code, .library-file-mappings code { overflow-wrap: anywhere; }
+.library-file-mappings li { padding: .5rem 0; }
+.library-file-mappings small { display: block; overflow-wrap: anywhere; }

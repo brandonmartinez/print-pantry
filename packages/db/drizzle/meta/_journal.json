@@ -71,6 +71,13 @@
       "when": 1792390811443,
       "tag": "0009_material_iceman",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792421393827,
+      "tag": "0010_abnormal_lady_bullseye",
+      "breakpoints": true
     }
   ]
 }

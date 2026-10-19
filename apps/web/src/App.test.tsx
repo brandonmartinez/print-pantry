@@ -153,6 +153,9 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
     if (path === '/api/auth/login') return jsonResponse({ user: { id: 'u-1', username: 'maker', role } });
     if (path === '/api/auth/logout') return jsonResponse(undefined, 204);
     if (path.startsWith('/api/imports?')) return jsonResponse({ items: [], page: 1, pageSize: 12, total: 0 });
+    if (path.startsWith('/api/library/management?')) return jsonResponse({
+      items: [], total: 0, page: 1, pageSize: 50, summary: { legacy: 0, managed: 0, missing: 0 }, plans: [],
+    });
     if (path.startsWith('/api/catalog/projects?')) {
       const url = new URL(path, 'http://localhost');
       const requestedPage = Number(url.searchParams.get('page'));
@@ -230,6 +233,31 @@ it('signs in and shows the authenticated image-first catalog', async () => {
   const initialQuery = new URL(calls.find(({ path }) => path.startsWith('/api/catalog/projects?'))!.path, 'http://localhost').searchParams;
   expect(initialQuery.has('category')).toBe(false);
   expect(initialQuery.has('fileType')).toBe(false);
+});
+
+it('offers library management to operators and routes there without loading the catalog', async () => {
+  window.history.replaceState({}, '', '/manage-library');
+  const { calls } = await signIn('operator', {}, 'Manage library');
+  expect(screen.getByRole('link', { name: 'Manage library' }).getAttribute('aria-current')).toBe('page');
+  await screen.findByText('0 legacy projects · 0 managed projects · 0 catalog projects marked missing');
+  expect(calls.some(({ path }) => path.startsWith('/api/library/management?'))).toBe(true);
+  expect(calls.some(({ path }) => path.startsWith('/api/catalog/projects?'))).toBe(false);
+});
+
+it('blocks direct library-management navigation for requesters without sending operator API requests', async () => {
+  const { calls } = await signIn();
+  expect(screen.queryByRole('link', { name: 'Manage library' })).toBeNull();
+  cleanup();
+  window.history.replaceState({}, '', '/manage-library');
+  const unauthorized = mockApi();
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Welcome to the pantry' });
+  fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'maker' } });
+  fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pantry-pass' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('requires operator access');
+  expect(calls.some(({ path }) => path.startsWith('/api/library/'))).toBe(false);
+  expect(unauthorized.calls.some(({ path }) => path.startsWith('/api/library/'))).toBe(false);
 });
 
 it('lets household members open Add New Print and navigate to Imports', async () => {
