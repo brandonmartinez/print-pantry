@@ -717,6 +717,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .library-management .queue-panel { margin-top: 1.5rem; }
 .library-management-summary { font-weight: 600; }
 .library-management-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin: 1rem 0; }
+.library-migration-controls { margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.library-migration-controls .source-candidate-choice + .source-candidate-choice { margin-top: .75rem; }
+.library-migration-controls .notice { overflow-wrap: anywhere; }
+.library-migration-projects { list-style: none; padding: 0; }
+.library-migration-projects > li { padding: 1rem 0; border-top: 1px solid var(--line); }
+.library-migration-projects strong { min-width: 0; overflow-wrap: anywhere; }
 .library-management-projects, .library-file-mappings { list-style: none; padding: 0; }
 .library-management-projects > li { border-top: 1px solid var(--line); padding: 1rem 0; }
 .library-storage-path { display: block; overflow-wrap: anywhere; margin: .4rem 0; }

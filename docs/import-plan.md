@@ -15,9 +15,12 @@ The operator Manage library checkpoint now provides paginated storage inventory
 and saved, read-only reorganization dry runs with proposed ID-based paths,
 preserved internal layout, indexed hashes, space estimates, and filesystem
 blockers. It does not authorize or execute migration. Bulk source discovery,
-optional AI organization, copy/verify/activate migration, collections, and
-managed reconciliation remain subsequent phases. No existing folders have
-been moved.
+optional AI organization, collections, and managed reconciliation remain
+subsequent phases. Separately approved migration jobs now support request-driven,
+per-project copy, fresh hash verification, explicit activation, retry/cancellation,
+and verified restoration. Durable journals preserve existing identities, request
+references, and both copies; legacy scans exclude activated originals. No
+existing library is migrated automatically.
 
 ## Recommendation
 

@@ -3,7 +3,8 @@
 Household users submit URLs; operators acquire files manually and publish
 reviewed projects into separate managed storage. No site credentials or AI
 key are required. There is no automatic MakerWorld download or automatic
-printing. The existing library remains read-only and is not reorganized.
+printing. The legacy library stays read-only; adopting existing projects into
+managed storage is a separate, explicitly approved copy-first workflow.
 
 ## Try it
 
@@ -285,7 +286,7 @@ destination directory entries), 12 relative-path components, and an 8 MiB saved
 snapshot. Split a batch when limits are reported. No destination directories
 are created. Current directory entries and descriptor-based file stats are
 checked against indexed ownership, sizes, timestamps, and available inode/device
-evidence. Hashes come from indexed versions: this phase does **not** rehash file
+evidence. Hashes come from indexed versions: the preview does **not** rehash file
 contents, copy files, or verify a new copy. Stat checks cannot detect every
 content change, especially changes that preserve timestamps and sizes.
 
@@ -318,8 +319,8 @@ new dry run after resolving blockers or changing files/metadata.
    and space estimates. Managed projects cannot be selected through the UI.
 4. Reload or reopen the saved URL; the snapshot should persist.
 5. Confirm files remain in their original location and existing downloads and
-   print requests still work. There is intentionally no migration/activation
-   button in this checkpoint.
+   print requests still work. Do not approve migration until you have reviewed
+   the separate workflow below.
 
 All routes below are operator-only:
 
@@ -327,16 +328,102 @@ All routes below are operator-only:
 | --- | --- |
 | `GET /api/library/management?q=&page=1` | 50-project catalog page, summary counts, ten recent plans |
 | `POST /api/library/reorganization-plans` | Save a dry run for explicit `projectIds` |
-| `GET /api/library/reorganization-plans/:id` | Reopen an immutable saved dry run |
+| `GET /api/library/reorganization-plans/:id` | Reopen the immutable dry run with current migration progress, if approved |
+
+## Library adoption: copy, verify, activate, and restore
+
+**Test a small synthetic legacy project first. Do not use the NAS as a test
+fixture.** Obtain an independent, verified database/filesystem backup before
+adopting real projects. Retaining originals is not a backup.
+
+1. Generate and review an unblocked, complete dry run. Saved older previews are
+   still historical evidence; generate a fresh one after any metadata, file,
+   version, or storage change.
+2. Under **Adopt into managed storage**, acknowledge the backup/retention
+   requirement and review of notes and space estimates. Choose **Approve
+   migration**. This creates a durable job only; no files are copied yet.
+3. Choose **Copy and verify** for one project. Files and empty directories go
+   into private managed staging, with an internal recovery manifest. The app
+   freshly checks indexed hashes against source bytes, copied bytes, and source
+   bytes again. Legacy remains authoritative and existing catalog rows do not
+   switch. Verify existing downloads and requests still work.
+4. Choose **Activate managed copy**, then **Confirm activation**. Inventory,
+   hashes, catalog evidence, root identity, and destination ownership are checked
+   again. The verified directory is published at the proposed path and existing
+   project/asset locations are updated transactionally. Project, asset, and
+   version IDs, display metadata, sources, classifications, request history, and
+   historical request-file snapshots are preserved. New paths resolve through
+   those same IDs.
+5. Reload the saved plan. Progress must persist without automatically repeating
+   an operation. Open the project, inspect previews and metadata, download a file,
+   and open an existing print request. Run a legacy rescan: the retained original
+   must not become a duplicate project or replace the managed metadata.
+6. To test recovery, choose **Restore legacy location**, then **Confirm
+   restoration**. Both copies must still match the approved inventory and bytes,
+   and current file identities/versions must be unchanged. The catalog switches
+   back without editing either copy. Later display-metadata changes are retained,
+   including across subsequent legacy scans. The managed copy remains in place.
+
+Each project has its own status and last error. The job uses optimistic revisions
+and a shared database advisory lock with scans and import publication. Concurrent
+storage operations return a conflict instead of running together. Operations are
+synchronous requests, not background workers; large projects may outlast proxy
+timeouts. Refresh to inspect durable state before retrying. Refreshing or closing
+the browser does not cancel work already running on the server.
+
+An interrupted copy remains `copying`; **Retry copy and verify** recreates only
+that journal's private staging directory and verifies the source again. An
+interrupted activation resumes using the exact manifest/inventory/hash-verified
+destination rather than overwriting it or allocating new IDs. Failures keep
+legacy authoritative unless catalog activation has already committed. Never edit
+manifests to force acceptance.
+
+**Cancel remaining migration** requires confirmation. It cancels only pending,
+copying, or copied projects; activated projects stay managed and can still be
+restored. Private staging is retained. A verified final directory left by an
+interrupted activation is moved to a journal-specific retained location before
+cancellation commits. Metadata changes do not prevent abandoning unactivated
+work. Start again with a new reviewed preview; canceled jobs are not reused.
+Copy cancellation is between requests, not an interrupt of a running copy.
+
+Storage must retain the approved absolute roots and filesystem identities.
+Unavailable roots, changed mount identities, unsafe paths/links, extra files,
+changed versions or bytes, overlaps, occupied destinations, insufficient reported
+space, and durability errors stop the operation. Repair/review the underlying
+problem rather than bypassing verification. Copies preserve internal layout;
+only the root becomes `projects/<existing-id>-<snake_case_title>`.
+
+The migration-only `project.json` records journal identity, approved metadata,
+layout, hashes, and original paths. It is internal recovery evidence, not an
+additional catalog asset, so migration/restoration does not create/remove asset
+IDs or alter historical version records. The database remains authoritative for
+metadata and source associations. Back up journals and managed storage together.
+
+There is no automatic purge. `projects/.migration-<journal-id>` staging,
+`projects/.retained-<journal-id>` cancellation copies, original legacy folders,
+and managed copies retained after restoration consume storage. A restored
+project's managed directory still occupies its proposed destination; a new dry
+run deliberately blocks rather than overwriting it. Cleanup or relocating
+retained copies requires separate operator review and verified backups; it is
+not implemented by this workflow.
+
+All migration routes are operator-only:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/library/reorganization-plans/:id/migrate` | Approve with `expectedFingerprint`, `confirmRetainedCopies: true`, and `acknowledgeWarnings: true`; repeated approval returns the same job |
+| `GET /api/library/migrations/:id` | Read durable per-project progress, revision, and errors |
+| `POST /api/library/migrations/:id/projects/:projectId` | Explicit `copy`, `activate`, or `restore` with `expectedRevision` |
+| `POST /api/library/migrations/:id/cancel` | Cancel unactivated work with `expectedRevision`; keep both copies |
 
 ## Subsequent checkpoints
 
 1. Bulk source discovery and periodic managed-root reconciliation.
 2. Optional OpenAI-assisted suggestions with explicit privacy/budget controls;
    deterministic organization continues to work without a provider.
-3. Collections/metadata management and copy/verify/activate migration with
-   recovery. The current dry run does not activate it. Test a small synthetic
-   library before approving any real-library reorganization.
+3. Collections and broader metadata management, plus separately approved cleanup
+   of retained copies. Test a small synthetic library before approving any
+   real-library adoption.
 
 Automatic site acquisition remains a separate adapter capability; this
 checkpoint supports manual intake from any website.

@@ -198,7 +198,7 @@ The database and filesystem stores are separate recovery domains. Back up all:
 | --- | --- | --- |
 | PostgreSQL | Catalog, accounts, sessions, requests, queue state, selected versions, and action history | Quiesce writes or use a PostgreSQL-consistent backup method. |
 | Library | Model files, assets, sidecars, source metadata, and archive roots | Use storage-consistent snapshots/copies and retain the source-to-backup mapping. |
-| Managed library | Entire `pantry_managed_library` volume, including project manifests and any recovery staging directories | Quiesce import publication and capture with the matching database. |
+| Managed library | Entire `pantry_managed_library` volume, including project manifests, migration staging, and retained copies | Quiesce import publication and library migration, and capture with the matching database. |
 | Import originals | Entire `pantry_import_data` volume, including batch receipts, recovery manifests, raw archives, and extracted input files | Retain even soft-removed inputs; capture with the matching database. |
 | Deployment secrets/configuration | Environment values, password-file location, library/client mount mapping, and reverse-proxy configuration | Store separately with access controls; never commit secrets. |
 
@@ -268,6 +268,20 @@ Never manually delete originals or stage folders while an operation is active.
 Retained originals have no automatic purge; agree a retention policy and
 independent backup before any future cleanup feature is enabled. See
 [the manual-import guide](import-queue.md) for limits and operator testing.
+
+Library adoption uses separately approved, request-driven copy/verify/activate
+jobs with durable database journals. Keep `LIBRARY_ROOT` read-only and retain
+its original files: neither activation nor restoration requires source write
+access. Scans and publication share an exclusive database lock with migration.
+After a timeout/restart, reopen the saved plan and refresh progress before
+retrying; an operation may have completed after the browser stopped waiting.
+The roots and their filesystem identities must match the approved mounts.
+Do not delete private `.migration-*` staging or `.retained-*` copies, or move
+restored managed directories, without reviewing the journal and backup coverage.
+There is no purge or periodic drift reconciler. Verify real-library backups
+before adoption and exercise the
+[synthetic adoption/restore checkpoint](import-queue.md#library-adoption-copy-verify-activate-and-restore)
+first.
 
 Refuse a restore target unless it is positively identified as the disposable
 verification instance. Do not automate broad deletes, volume removal, or a

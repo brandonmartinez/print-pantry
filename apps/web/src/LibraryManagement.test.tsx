@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { LibraryManagementResponse, LibraryReorganizationPlan } from '@print-pantry/contracts';
+import type { LibraryManagementResponse, LibraryMigrationJob, LibraryReorganizationPlan } from '@print-pantry/contracts';
 import { LibraryManagement } from './LibraryManagement.js';
 
 const inventory: LibraryManagementResponse = {
@@ -25,15 +25,39 @@ const plan: LibraryReorganizationPlan = {
   }],
 };
 function Location() { return <output data-testid="location">{useLocation().search}</output>; }
-function setup(options: { initial?: string; data?: LibraryManagementResponse; saved?: LibraryReorganizationPlan; failPreview?: boolean; failLoad?: boolean } = {}) {
+const initialJob: LibraryMigrationJob = {
+  id: 'migration-job', planId: plan.id, status: 'active', revision: 0, createdAt: plan.createdAt, updatedAt: plan.createdAt,
+  projects: [{ projectId: plan.projects[0].id, name: plan.projects[0].name, status: 'pending',
+    legacyPath: plan.projects[0].relativePath, managedPath: plan.projects[0].destinationPath, lastError: null }],
+};
+function setup(options: { initial?: string; data?: LibraryManagementResponse; saved?: LibraryReorganizationPlan; failPreview?: boolean; failLoad?: boolean; failMigration?: boolean } = {}) {
   let data = structuredClone(options.data ?? inventory);
+  let saved = structuredClone(options.saved ?? plan);
+  let job = saved.migration ?? structuredClone(initialJob);
   const request = vi.fn(async (path: string, init?: RequestInit) => {
+    if (path.includes('/migrations/')) {
+      if (init?.method === 'POST') {
+        if (options.failMigration) {
+          job = { ...job, revision: job.revision + 1, projects: job.projects.map((item) => ({ ...item, status: 'copying', lastError: 'Disk full; retry after freeing space' })) };
+          throw new Error('Migration stopped: disk full');
+        }
+        const body = JSON.parse(init.body as string);
+        job = { ...job, revision: job.revision + 1,
+          status: path.endsWith('/cancel') ? 'canceled' : body.action === 'activate' || body.action === 'restore' ? 'completed' : 'active',
+          projects: job.projects.map((item) => ({ ...item, lastError: null,
+            status: path.endsWith('/cancel') ? 'canceled' : body.action === 'copy' ? 'copied' : body.action === 'activate' ? 'activated' : 'restored' })),
+        };
+      }
+      saved = { ...saved, migration: job };
+      return job;
+    }
+    if (path.endsWith('/migrate')) { saved = { ...saved, migration: job }; return job; }
     if (init?.method === 'POST') {
       if (options.failPreview) throw new Error('Wait for the library scan to finish');
       data = { ...data, plans: [{ id: plan.id, createdAt: plan.createdAt, projectCount: 1 }] };
       return plan;
     }
-    if (path.includes('/reorganization-plans/')) return options.saved ?? plan;
+    if (path.includes('/reorganization-plans/')) return saved;
     if (options.failLoad) throw new Error('Library database unavailable');
     const query = new URL(path, 'http://localhost').searchParams;
     return { ...data, page: Number(query.get('page') ?? 1) };
@@ -157,7 +181,7 @@ it('makes batch-wide blockers visible on every affected project even when its fi
   const project = await screen.findByRole('article', { name: 'Legacy holder preview' });
   expect(within(project).getByText('Blocked')).toBeTruthy();
   expect(screen.getByRole('region', { name: 'Blockers (1)' }).textContent).toContain('Managed storage is offline');
-  expect(screen.getByRole('region', { name: 'Notes (1)' }).textContent).toContain('fresh verification');
+  expect(screen.getByRole('region', { name: 'Notes (1)' }).textContent).toContain('indexed evidence');
 });
 
 it('formats zero, byte/unit boundaries, and large totals while retaining exact decimal byte evidence', async () => {
@@ -210,4 +234,83 @@ it('surfaces inventory load failures and provides an explicit refresh', async ()
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
   await waitFor(() => expect(request.mock.calls).toHaveLength(2));
   expect(screen.queryByRole('button', { name: 'Preview reorganization (0)' })).toBeNull();
+});
+
+it('requires two unchecked acknowledgements, approves only, then copies and activates with confirmation', async () => {
+  const request = setup({ initial: '/manage-library?plan=saved-plan' });
+  const approve = await screen.findByRole('button', { name: 'Approve migration' });
+  const retained = screen.getByRole('checkbox', { name: /current backup/ });
+  const reviewed = screen.getByRole('checkbox', { name: /reviewed the preview/ });
+  expect(retained).toHaveProperty('checked', false);
+  expect(reviewed).toHaveProperty('checked', false);
+  expect(approve).toHaveProperty('disabled', true);
+  fireEvent.click(retained);
+  expect(approve).toHaveProperty('disabled', true);
+  fireEvent.click(reviewed);
+  fireEvent.click(approve);
+  await screen.findByText('Awaiting copy');
+  expect(request).toHaveBeenCalledWith('/api/library/reorganization-plans/saved-plan/migrate', { method: 'POST', body: JSON.stringify({
+    expectedFingerprint: plan.fingerprint, confirmRetainedCopies: true, acknowledgeWarnings: true,
+  }) });
+  expect(request.mock.calls.filter(([, init]) => init?.method)).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Copy and verify' }));
+  await screen.findByText('Copy verified; legacy still active');
+  expect(request).toHaveBeenCalledWith(`/api/library/migrations/migration-job/projects/${plan.projects[0].id}`, {
+    method: 'POST', body: JSON.stringify({ expectedRevision: 0, action: 'copy' }),
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Activate managed copy' }));
+  expect(request.mock.calls.filter(([, init]) => init?.method)).toHaveLength(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm activation' }));
+  await screen.findByText('Managed copy active');
+  expect(request).toHaveBeenCalledWith(`/api/library/migrations/migration-job/projects/${plan.projects[0].id}`, {
+    method: 'POST', body: JSON.stringify({ expectedRevision: 1, action: 'activate' }),
+  });
+  expect(screen.queryByText('Preview only · No files moved')).toBeNull();
+});
+
+it('never enables approval for blocked or incomplete saved previews', async () => {
+  const request = setup({ initial: '/manage-library?plan=saved-plan', saved: {
+    ...plan, projects: [{ ...plan.projects[0], inspectionComplete: false }],
+  } });
+  expect(await screen.findByRole('button', { name: 'Approve migration' })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('checkbox', { name: /current backup/ })).toHaveProperty('disabled', true);
+  expect(request.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+});
+
+it('reloads saved progress without restarting work and retries using the refreshed revision after a failure', async () => {
+  const request = setup({ initial: '/manage-library?plan=saved-plan', saved: { ...plan, migration: initialJob }, failMigration: true });
+  await screen.findByText('Awaiting copy');
+  expect(request.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Copy and verify' }));
+  await screen.findByText('Migration stopped: disk full');
+  expect(await screen.findByText('Disk full; retry after freeing space')).toBeTruthy();
+  expect(screen.getByText('Copy interrupted or in progress')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry copy and verify' }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith(`/api/library/migrations/migration-job/projects/${plan.projects[0].id}`, {
+    method: 'POST', body: JSON.stringify({ expectedRevision: 1, action: 'copy' }),
+  }));
+});
+
+it('requires cancellation confirmation and does not resume canceled work', async () => {
+  const request = setup({ initial: '/manage-library?plan=saved-plan', saved: { ...plan, migration: initialJob } });
+  fireEvent.click(await screen.findByRole('button', { name: 'Cancel remaining migration' }));
+  expect(request.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm cancellation' }));
+  await screen.findByText('Canceled; legacy still active');
+  expect(screen.queryByRole('button', { name: 'Copy and verify' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Approve migration' })).toBeNull();
+  expect(request).toHaveBeenCalledWith('/api/library/migrations/migration-job/cancel', { method: 'POST', body: '{"expectedRevision":0}' });
+});
+
+it('requires confirmation to restore an activated project even when remaining work was canceled', async () => {
+  const job: LibraryMigrationJob = { ...initialJob, status: 'canceled', revision: 7,
+    projects: initialJob.projects.map((item) => ({ ...item, status: 'activated' })) };
+  const request = setup({ initial: '/manage-library?plan=saved-plan', saved: { ...plan, migration: job } });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore legacy location' }));
+  expect(request.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm restoration' }));
+  await screen.findByText('Legacy restored; managed copy retained');
+  expect(request).toHaveBeenCalledWith(`/api/library/migrations/migration-job/projects/${plan.projects[0].id}`, {
+    method: 'POST', body: JSON.stringify({ expectedRevision: 7, action: 'restore' }),
+  });
 });

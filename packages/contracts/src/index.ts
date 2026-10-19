@@ -82,6 +82,25 @@ export interface LibraryReorganizationPlan {
   additionalBytes: string;
   availableBytes: string | null;
   issues: LibraryPlanIssue[];
+  migration?: LibraryMigrationJob;
+}
+
+export type LibraryMigrationProjectStatus = 'pending' | 'copying' | 'copied' | 'activated' | 'restored' | 'canceled';
+export interface LibraryMigrationJob {
+  id: string;
+  planId: string;
+  status: 'active' | 'completed' | 'canceled';
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  projects: Array<{
+    projectId: string;
+    name: string;
+    status: LibraryMigrationProjectStatus;
+    legacyPath: string;
+    managedPath: string;
+    lastError: string | null;
+  }>;
 }
 
 export interface LibraryManagementResponse {

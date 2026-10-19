@@ -62,7 +62,10 @@ before forwarding to Fastify.
 Operators can use **Manage library** for paginated legacy/managed inventory and
 saved reorganization dry runs. Previews preserve existing project IDs and
 internal file layout, flag filesystem/storage blockers, and do not move or
-activate files. See the [library preview testing checkpoint](docs/import-queue.md#library-management-read-only-reorganization-preview)
+activate files. A separately approved migration copies and freshly verifies each
+project before explicit activation, preserving IDs and retaining legacy originals.
+Jobs support retry, cancellation of unactivated work, and verified restoration.
+See the [library adoption testing checkpoint](docs/import-queue.md#library-adoption-copy-verify-activate-and-restore)
 before proceeding with library adoption.
 
 Mount the library **read-only** at `LIBRARY_ROOT` (the development container

@@ -78,6 +78,13 @@
       "when": 1792421393827,
       "tag": "0010_abnormal_lady_bullseye",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792425028470,
+      "tag": "0011_keen_frightful_four",
+      "breakpoints": true
     }
   ]
 }

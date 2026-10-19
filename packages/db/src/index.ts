@@ -4,6 +4,7 @@ import * as schema from './schema.js';
 
 export { schema };
 export { runMigrations } from './migrate.js';
+export const libraryMutationLock = 98420;
 
 export function createPool(connectionString: string): Pool {
   if (!connectionString) throw new Error('DATABASE_URL is required');

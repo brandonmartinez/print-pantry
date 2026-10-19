@@ -5,7 +5,7 @@ import type { Readable } from 'node:stream';
 import { isDeepStrictEqual } from 'node:util';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { PoolClient } from 'pg';
-import type { createPool } from '@print-pantry/db';
+import { libraryMutationLock, type createPool } from '@print-pantry/db';
 import type {
   ImportIntakeResult, ImportMetadata, ImportPlan, ImportStatus,
 } from '@print-pantry/contracts';
@@ -431,8 +431,8 @@ export function registerImportIntake(
     if (!intake.plan) throw new IntakeError('Process and review the files before publishing', 409);
     const plan = intake.plan;
     validatePlanPaths(plan.files);
-    const claim = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock(98420) AS locked');
-    if (!claim.rows[0].locked) throw new IntakeError('Another import is publishing; retry after it finishes', 409);
+    const claim = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [libraryMutationLock]);
+    if (!claim.rows[0].locked) throw new IntakeError('A scan, publication, or migration is running; retry after it finishes', 409);
     try {
       const currentDuplicates = await duplicates(client, row, plan, intake.reserved_project_id ?? undefined);
       if (currentDuplicates.length && !request.body.confirmDuplicates) {
@@ -549,6 +549,6 @@ export function registerImportIntake(
         await updateStatus(client, row, 'imported', auth.currentUser(request));
       });
       return result(client, row.id, true);
-    } finally { await client.query('SELECT pg_advisory_unlock(98420)'); }
+    } finally { await client.query('SELECT pg_advisory_unlock($1)', [libraryMutationLock]); }
   }));
 }

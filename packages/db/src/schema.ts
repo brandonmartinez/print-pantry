@@ -94,6 +94,40 @@ export const libraryReorganizationPlans = pgTable('library_reorganization_plans'
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [index('library_reorganization_created_idx').on(table.createdAt)]);
 
+export const libraryMigrations = pgTable('library_migrations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  planId: uuid('plan_id').notNull().references(() => libraryReorganizationPlans.id).unique(),
+  createdBy: uuid('created_by').notNull().references(() => users.id),
+  status: text('status', { enum: ['active', 'completed', 'canceled'] }).notNull().default('active'),
+  revision: integer('revision').notNull().default(0),
+  legacyRoot: text('legacy_root').notNull(),
+  managedRoot: text('managed_root').notNull(),
+  rootIdentities: jsonb('root_identities').notNull(),
+  history: jsonb('history').notNull().default([]),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  check('library_migrations_status_check', sql`${table.status} IN ('active','completed','canceled')`),
+]);
+
+export const libraryMigrationProjects = pgTable('library_migration_projects', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  migrationId: uuid('migration_id').notNull().references(() => libraryMigrations.id),
+  projectId: projectIdType('project_id').notNull().references(() => projects.id),
+  legacyRoot: text('legacy_root').notNull(),
+  legacyPath: text('legacy_path').notNull(),
+  managedPath: text('managed_path').notNull(),
+  status: text('status', { enum: ['pending', 'copying', 'copied', 'activated', 'restored', 'canceled'] }).notNull().default('pending'),
+  snapshot: jsonb('snapshot').notNull(),
+  lastError: text('last_error'),
+}, (table) => [
+  uniqueIndex('library_migration_project_job_idx').on(table.migrationId, table.projectId),
+  uniqueIndex('library_migration_project_active_idx').on(table.projectId)
+    .where(sql`${table.status} IN ('pending','copying','copied','activated')`),
+  index('library_migration_legacy_idx').on(table.legacyRoot, table.status),
+  check('library_migration_projects_status_check', sql`${table.status} IN ('pending','copying','copied','activated','restored','canceled')`),
+]);
+
 export const importUploads = pgTable('import_uploads', {
   id: uuid('id').primaryKey(),
   requestId: uuid('request_id').notNull().references(() => importIntakes.requestId),

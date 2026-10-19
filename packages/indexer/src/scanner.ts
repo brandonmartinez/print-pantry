@@ -3,7 +3,7 @@ import { constants, createReadStream, type Stats } from 'node:fs';
 import { lstat, open, readdir } from 'node:fs/promises';
 import { basename, extname, join, relative, resolve, sep } from 'node:path';
 import { and, eq, isNotNull, isNull, notInArray } from 'drizzle-orm';
-import { createDatabase, schema } from '@print-pantry/db';
+import { createDatabase, libraryMutationLock, schema } from '@print-pantry/db';
 import { inspectThreeMf, validateImage } from './preview.js';
 
 export type ScanStatus = 'running' | 'succeeded' | 'partial' | 'failed' | 'offline';
@@ -140,7 +140,7 @@ function signature(files: { path: string; hash: string; size: number }[]): strin
 
 export class ScanInProgressError extends Error {
   constructor() {
-    super('A library scan is already running');
+    super('A library scan or storage change is already running');
     this.name = 'ScanInProgressError';
   }
 }
@@ -158,6 +158,22 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
   async function rescan(): Promise<ScanResult> {
     if (running) throw new ScanInProgressError();
     running = true;
+    try {
+      const coordinator = await db.$client.connect();
+      let locked = false;
+      try {
+        const claim = await coordinator.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [libraryMutationLock]);
+        locked = claim.rows[0].locked;
+        if (!locked) throw new ScanInProgressError();
+        return await scanLibrary();
+      } finally {
+        try { if (locked) await coordinator.query('SELECT pg_advisory_unlock($1)', [libraryMutationLock]); }
+        finally { coordinator.release(); }
+      }
+    } finally { running = false; }
+  }
+
+  async function scanLibrary(): Promise<ScanResult> {
     const startedAt = new Date();
     const id = randomUUID();
     const result: ScanResult = { id, status: 'running', filesSeen: 0, hashedFiles: 0,
@@ -189,6 +205,13 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
       const overrides = new Map((await db.select().from(schema.projectBoundaryOverrides))
         .map((override) => [override.relativePath, override.kind]));
       const oldAssetsByPath = new Map(previousAssets.map((asset) => [asset.relativePath, asset]));
+      const migrations = await db.select({
+        projectId: schema.libraryMigrationProjects.projectId,
+        path: schema.libraryMigrationProjects.legacyPath,
+        status: schema.libraryMigrationProjects.status,
+      }).from(schema.libraryMigrationProjects).where(eq(schema.libraryMigrationProjects.legacyRoot, libraryRoot));
+      const retained = new Set(migrations.filter((item) => item.status === 'activated').map((item) => item.path));
+      const restoredMetadata = new Set(migrations.filter((item) => item.status === 'restored').map((item) => item.projectId));
       const allFiles: FileInfo[] = [];
       const directories: Directory[] = [];
 
@@ -205,6 +228,7 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
         for (const entry of entries.sort((a, b) => collator.compare(a.name, b.name)
           || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
           const childPath = path ? `${path}/${entry.name}` : entry.name;
+          if (retained.has(childPath)) continue;
           if (entry.isDirectory() && ignored.has(entry.name.toLowerCase())) continue;
           const fullPath = join(libraryRoot, childPath);
           try {
@@ -472,7 +496,8 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
           if (existing) {
             projectId = existing.id;
             await tx.update(schema.projects).set({
-              relativePath: projectPath, categoryId, name: basename(projectPath),
+              relativePath: projectPath,
+              ...(!restoredMetadata.has(projectId) ? { categoryId, name: basename(projectPath) } : {}),
               missingAt: null, updatedAt: new Date(),
             }).where(eq(schema.projects.id, projectId));
           } else {
@@ -566,8 +591,6 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
         console.error('Unable to persist failed library scan:', persistError);
       }
       throw error;
-    } finally {
-      running = false;
     }
 
     async function finish(): Promise<ScanResult> {

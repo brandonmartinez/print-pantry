@@ -6,7 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import type { createPool } from '@print-pantry/db';
 import {
   isProjectId, projectIdPattern, type LibraryManagementProject, type LibraryManagementResponse,
-  type LibraryPlanIssue, type LibraryReorganizationPlan, type LibraryReorganizationProject,
+  type LibraryPlanIssue, type LibraryReorganizationPlan, type LibraryReorganizationProject, type LibraryMigrationJob,
 } from '@print-pantry/contracts';
 import type { createAuth } from './auth.js';
 import type { CatalogOptions } from './catalog.js';
@@ -15,13 +15,13 @@ import { IntakeError, pathKey, portablePath, projectSlug, validatePlanPaths } fr
 import { isOsMetadata } from './os-metadata.js';
 
 type Pool = ReturnType<typeof createPool>;
-type ProjectRow = {
+export type LibraryProjectRow = {
   id: string; name: string; storage_kind: 'legacy' | 'managed'; relative_path: string;
   category: string | null; category_id: string | null; missing_at: Date | null;
   description: string | null; tags: string[]; designer: string | null; source_url: string | null;
   license: string | null; notes: string | null; file_count: number; size_bytes: string; source_count: number;
 };
-type FileRow = {
+export type LibraryFileRow = {
   id: string; current_version_id: string | null; relative_path: string; project_relative_path: string;
   storage_kind: string; size_bytes: string; mtime_ms: string; inode: string | null; device: string | null;
   content_hash: string | null; version_hash: string | null; version_size: string | null;
@@ -29,13 +29,17 @@ type FileRow = {
 };
 export const libraryPreviewLimits = { projects: 25, files: 1000, entries: 2000, depth: 12, bytes: 8 * 1024 * 1024 };
 const uuid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
-const projectSelect = `SELECT p.*,c.relative_path AS category,
+export const libraryProjectSelect = `SELECT p.*,c.relative_path AS category,
   (SELECT count(*)::int FROM assets a WHERE a.project_id=p.id) AS file_count,
   (SELECT coalesce(sum(a.size_bytes),0)::text FROM assets a WHERE a.project_id=p.id) AS size_bytes,
   (SELECT count(*)::int FROM project_sources s WHERE s.project_id=p.id) AS source_count
   FROM projects p LEFT JOIN categories c ON c.id=p.category_id`;
+export const libraryFileSelect = `SELECT a.*,v.content_hash AS version_hash,v.size_bytes::text AS version_size,
+  v.asset_id AS version_asset_id,v.missing_at AS version_missing_at FROM assets a
+  LEFT JOIN asset_versions v ON v.id=a.current_version_id WHERE a.project_id=$1 ORDER BY a.project_relative_path,a.id
+  LIMIT $2`;
 const message = (error: unknown) => error instanceof Error ? error.message : 'Unknown filesystem error';
-function summary(row: ProjectRow): LibraryManagementProject {
+function summary(row: LibraryProjectRow): LibraryManagementProject {
   return {
     id: row.id, name: row.name, storageKind: row.storage_kind, relativePath: row.relative_path,
     category: row.category, available: !row.missing_at, fileCount: row.file_count,
@@ -46,8 +50,8 @@ function issue(issues: LibraryPlanIssue[], code: string, text: string, relativeP
   issues.push({ severity, code, relativePath, message: text });
 }
 
-async function inspect(
-  root: string, project: LibraryReorganizationProject, files: FileRow[], budget: { entries: number },
+export async function inspectLibraryProject(
+  root: string, project: LibraryReorganizationProject, files: LibraryFileRow[], budget: { entries: number },
 ) {
   const known = new Map(files.map((file) => [file.project_relative_path, file]));
   const seen = new Set<string>();
@@ -130,6 +134,7 @@ async function inspect(
 
 export function registerLibraryManagement(
   server: FastifyInstance, pool: Pool, auth: ReturnType<typeof createAuth>, options: CatalogOptions,
+  migrationForPlan: (id: string) => Promise<LibraryMigrationJob | undefined>,
 ) {
   server.get<{ Querystring: { q?: string; page?: number } }>('/library/management', {
     preHandler: auth.operatorOnly,
@@ -143,7 +148,7 @@ export function registerLibraryManagement(
     const term = request.query.q ?? '';
     const filter = `WHERE position(lower($1) IN lower(p.name))>0 OR position(lower($1) IN lower(p.relative_path))>0`;
     const [items, count, totals, plans] = await Promise.all([
-      pool.query<ProjectRow>(`${projectSelect} ${filter} ORDER BY p.id LIMIT 50 OFFSET $2`, [term, (page - 1) * 50]),
+      pool.query<LibraryProjectRow>(`${libraryProjectSelect} ${filter} ORDER BY p.id LIMIT 50 OFFSET $2`, [term, (page - 1) * 50]),
       pool.query<{ total: number }>(`SELECT count(*)::int AS total FROM projects p ${filter}`, [term]),
       pool.query<LibraryManagementResponse['summary']>(`SELECT count(*) FILTER (WHERE storage_kind='legacy')::int AS legacy,
         count(*) FILTER (WHERE storage_kind='managed')::int AS managed,
@@ -163,7 +168,10 @@ export function registerLibraryManagement(
     } },
   }, async (request, reply) => {
     const result = await pool.query<{ snapshot: LibraryReorganizationPlan }>('SELECT snapshot FROM library_reorganization_plans WHERE id=$1', [request.params.id]);
-    return result.rows[0]?.snapshot ?? reply.code(404).send({ error: 'Reorganization preview not found' });
+    const snapshot = result.rows[0]?.snapshot;
+    if (!snapshot) return reply.code(404).send({ error: 'Reorganization preview not found' });
+    const migration = await migrationForPlan(request.params.id);
+    return migration ? { ...snapshot, migration } : snapshot;
   });
 
   server.post<{ Body: { projectIds: string[] } }>('/library/reorganization-plans', {
@@ -179,7 +187,7 @@ export function registerLibraryManagement(
     const client = await pool.connect();
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
-      const rows = (await client.query<ProjectRow>(`${projectSelect} WHERE p.id=ANY($1::bigint[]) ORDER BY p.id`, [request.body.projectIds])).rows;
+      const rows = (await client.query<LibraryProjectRow>(`${libraryProjectSelect} WHERE p.id=ANY($1::bigint[]) ORDER BY p.id`, [request.body.projectIds])).rows;
       if (rows.length !== request.body.projectIds.length) {
         await client.query('ROLLBACK');
         return reply.code(404).send({ error: 'One or more selected projects no longer exist' });
@@ -188,7 +196,7 @@ export function registerLibraryManagement(
         id: randomUUID(), createdAt: new Date().toISOString(), kind: 'dry_run', fingerprint: '',
         projects: [], additionalBytes: '0', availableBytes: null, issues: [],
       };
-      issue(plan.issues, 'verification_required', 'Dry run only: hashes come from indexed versions, not fresh content hashing. Copying, byte verification, and activation are not enabled.', null, 'warning');
+      issue(plan.issues, 'verification_required', 'Preview hashes come from indexed versions. Migration requires separate approval, fresh byte verification, and explicit activation.', null, 'warning');
       issue(plan.issues, 'retained_originals', 'Legacy originals stay in place. Additional bytes are a lower-bound estimate excluding manifests and filesystem overhead; retained copies are not independent backups.', null, 'warning');
       let legacyRoot: string | undefined;
       let managedRoot: string | undefined;
@@ -249,10 +257,7 @@ export function registerLibraryManagement(
         const overlaps = await client.query(`SELECT id FROM projects WHERE storage_kind='legacy' AND id<>$1
           AND (relative_path=$2 OR starts_with(relative_path,$2 || '/') OR starts_with($2,relative_path || '/')) LIMIT 1`, [row.id, row.relative_path]);
         if (overlaps.rowCount) issue(project.issues, 'overlapping_boundary', 'This project overlaps another catalog project. Review project boundaries before migration.');
-        const files = (await client.query<FileRow>(`SELECT a.*,v.content_hash AS version_hash,v.size_bytes::text AS version_size,
-          v.asset_id AS version_asset_id,v.missing_at AS version_missing_at FROM assets a
-          LEFT JOIN asset_versions v ON v.id=a.current_version_id WHERE a.project_id=$1 ORDER BY a.project_relative_path,a.id
-          LIMIT $2`, [row.id, libraryPreviewLimits.files + 1])).rows;
+        const files = (await client.query<LibraryFileRow>(libraryFileSelect, [row.id, libraryPreviewLimits.files + 1])).rows;
         evidence.push(files);
         for (const file of files) {
           project.files.push({ id: file.id, versionId: file.current_version_id, sourcePath: file.relative_path,
@@ -279,7 +284,7 @@ export function registerLibraryManagement(
           }
         } catch (error) { issue(project.issues, 'destination_unavailable', message(error)); }
         if (legacyRoot && !project.issues.some((entry) => entry.severity === 'blocker') && budget.entries <= libraryPreviewLimits.entries) {
-          await inspect(legacyRoot, project, files, budget);
+          await inspectLibraryProject(legacyRoot, project, files, budget);
         }
       }
       if (budget.entries > libraryPreviewLimits.entries && !plan.issues.some((entry) => entry.code === 'entry_limit')) {
