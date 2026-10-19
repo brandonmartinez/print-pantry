@@ -1,17 +1,92 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { LibraryManagementResponse, LibraryPlanIssue, LibraryReorganizationPlan } from '@print-pantry/contracts';
+import type { LibraryManagementResponse, LibraryPlanIssue, LibraryReorganizationPlan, LibraryReorganizationProject } from '@print-pantry/contracts';
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 const byteLabel = (value: string | null) => value === null ? 'Unknown' : `${BigInt(value).toLocaleString()} bytes`;
 const errorMessage = (reason: unknown) => reason instanceof Error ? reason.message : 'Library management failed; retry shortly.';
 
+function FileSize({ value }: { value: string | null }) {
+  if (value === null) return <span className="library-readable-size">Unknown</span>;
+  const bytes = BigInt(value);
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+  let unit = 0;
+  let divisor = 1n;
+  while (bytes >= divisor * 1024n && unit < units.length - 1) { divisor *= 1024n; unit++; }
+  const tenths = (bytes * 10n + divisor / 2n) / divisor;
+  const label = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(Number(tenths) / 10);
+  return <span className="library-readable-size" title={byteLabel(value)}>{label} {units[unit]}</span>;
+}
+
 function Issues({ items }: { items: LibraryPlanIssue[] }) {
-  if (!items.length) return null;
-  return <ul className="library-plan-issues">{items.map((item, index) => <li key={index}
-    className={item.severity === 'blocker' ? 'notice notice-error' : 'notice'}>
-    <strong>{item.severity === 'blocker' ? 'Blocked' : 'Note'}:</strong> {item.relativePath && <code>{item.relativePath}: </code>}{item.message}
-  </li>)}</ul>;
+  return <div className="library-issue-groups">{(['blocker', 'warning'] as const).map((severity) => {
+    const group = items.filter((item) => item.severity === severity);
+    if (!group.length) return null;
+    const label = `${severity === 'blocker' ? 'Blockers' : 'Notes'} (${group.length})`;
+    return <section key={severity} aria-label={label} className={`library-issue-group library-issue-${severity}`}>
+      <h4>{label}</h4><ul>{group.map((item, index) => <li key={index}>
+        {item.relativePath && <code>{item.relativePath}</code>}<span>{item.message}</span>
+      </li>)}</ul>
+    </section>;
+  })}</div>;
+}
+
+function ProjectPreview({ project, blockedByPlan }: { project: LibraryReorganizationProject; blockedByPlan: boolean }) {
+  const blocked = blockedByPlan || project.issues.some((item) => item.severity === 'blocker');
+  const status = blocked ? 'Blocked' : project.inspectionComplete ? 'Inspection complete' : 'Inspection incomplete';
+  return <article className="library-plan-project" aria-label={`${project.name} preview`}>
+    <header className="library-plan-project-heading">
+      <h3><Link to={`/projects/${project.id}`}>{project.name}</Link></h3>
+      <span className={`library-preview-status ${blocked ? 'is-blocked' : project.inspectionComplete ? 'is-complete' : 'is-incomplete'}`}>{status}</span>
+    </header>
+    <dl className="library-preview-facts">
+      <div><dt>Files checked</dt><dd>{project.checkedFiles} of {project.fileCount}</dd></div>
+      <div><dt>Category</dt><dd>{project.category ?? 'Uncategorized'}</dd></div>
+      <div><dt>Approved sources</dt><dd>{project.sourceCount ? project.sourceCount : 'None'}
+        {!project.sourceCount && <> · <Link to={`/projects/${project.id}`}>Review sources</Link></>}</dd></div>
+    </dl>
+    <dl className="library-folder-comparison">
+      <div><dt>Current folder <span>Legacy storage</span></dt><dd><code>{project.relativePath}</code></dd></div>
+      <div><dt>Proposed folder <span>Managed storage</span></dt><dd><code>{project.destinationPath}</code></dd></div>
+    </dl>
+    <p className="small-note quiet">Internal file layout is preserved. Project metadata and print-request references stay unchanged.</p>
+    <Issues items={project.issues} />
+    <details className="library-preview-files">
+      <summary>Files ({project.files.length})</summary>
+      <p className="small-note quiet">Paths below are relative to the project folders shown above. Sizes are rounded; expand technical details for exact bytes and indexed hashes.</p>
+      <ul className="library-file-mappings">{project.files.map((file) => {
+        const prefix = `${project.relativePath}/`;
+        const currentPath = file.sourcePath.startsWith(prefix) ? file.sourcePath.slice(prefix.length) : file.sourcePath;
+        const changed = currentPath !== file.destinationPath;
+        return <li key={file.id}>
+          <div className="library-file-overview">
+            <div className="library-relative-path">
+              {changed && <span className="small-note quiet">Current path</span>}
+              <code>{currentPath}</code>
+              {changed && <><span className="small-note quiet">Proposed path</span><code>{file.destinationPath}</code></>}
+            </div>
+            <FileSize value={file.sizeBytes} />
+          </div>
+          <details className="library-technical-details">
+            <summary>Technical details</summary>
+            <dl>
+              <div><dt>Asset ID</dt><dd>{file.id}</dd></div>
+              <div><dt>Version ID</dt><dd>{file.versionId ?? 'Missing'}</dd></div>
+              <div><dt>Indexed SHA-256</dt><dd>{file.contentHash ?? 'Missing'}</dd></div>
+              <div><dt>Exact size</dt><dd>{byteLabel(file.sizeBytes)}</dd></div>
+              <div><dt>Full current path</dt><dd>{file.sourcePath}</dd></div>
+              <div><dt>Full proposed path</dt><dd>{project.destinationPath}/{file.destinationPath}</dd></div>
+            </dl>
+          </details>
+        </li>;
+      })}</ul>
+    </details>
+    <details className="library-technical-details">
+      <summary>Project technical details</summary>
+      <dl><div><dt>Project ID</dt><dd>{project.id}</dd></div>
+        <div><dt>Indexed file bytes</dt><dd>{byteLabel(project.sizeBytes)}</dd></div></dl>
+    </details>
+  </article>;
 }
 
 export function LibraryManagement({ request }: { request: Request }) {
@@ -95,7 +170,7 @@ export function LibraryManagement({ request }: { request: Request }) {
             checked={selected.includes(project.id)} disabled={busy || loading || project.storageKind === 'managed' || (!selected.includes(project.id) && selected.length >= 25)}
             onChange={(event) => setSelected((previous) => event.target.checked ? [...previous, project.id] : previous.filter((id) => id !== project.id))} />
             <strong>{project.name}</strong></label>
-          <p className="small-note">{project.storageKind} · {project.fileCount} files · {byteLabel(project.sizeBytes)}
+          <p className="small-note">{project.storageKind} · {project.fileCount} files · <FileSize value={project.sizeBytes} />
             {project.category && ` · ${project.category}`}{!project.available && ' · Marked missing'}</p>
           <code className="library-storage-path">{project.relativePath}</code>
           <Link to={`/projects/${project.id}`}>Open project / manage sources</Link>
@@ -116,26 +191,25 @@ export function LibraryManagement({ request }: { request: Request }) {
     {planError && <p className="notice notice-error" role="alert">{planError}</p>}
     {planLoading && <p role="status">Loading saved dry run...</p>}
     {plan && <section className="queue-panel" aria-labelledby="dry-run-heading">
-      <h2 id="dry-run-heading">Saved reorganization preview</h2>
+      <div className="library-plan-project-heading"><h2 id="dry-run-heading">Saved reorganization preview</h2>
+        <span className="library-preview-status">Preview only · No files moved</span></div>
       <p className="small-note">Snapshot from {new Date(plan.createdAt).toLocaleString()}; it can become stale. Fresh verification is required before any future activation.</p>
-      <p>Additional file-copy bytes (lower bound): <strong>{byteLabel(plan.additionalBytes)}</strong><br />
-        Available managed storage at preview time: <strong>{byteLabel(plan.availableBytes)}</strong></p>
+      <dl className="library-preview-facts library-preview-totals">
+        <div><dt>Projects in preview</dt><dd>{plan.projects.length}</dd></div>
+        <div><dt>Additional copy space <span>Lower bound</span></dt><dd><FileSize value={plan.additionalBytes} /></dd></div>
+        <div><dt>Available managed storage <span>At preview time</span></dt><dd><FileSize value={plan.availableBytes} /></dd></div>
+      </dl>
+      <p className="small-note">File contents have not been rehashed. This preview does not approve or enable migration.</p>
       <Issues items={plan.issues} />
-      {plan.projects.map((project) => <article className="library-plan-project" key={project.id}>
-        <h3><Link to={`/projects/${project.id}`}>{project.name}</Link> <span className="small-note">ID {project.id}</span></h3>
-        <p>Legacy: <code className="library-storage-path">{project.relativePath}</code>
-          Proposed managed: <code className="library-storage-path">{project.destinationPath}</code></p>
-        <p className="small-note">{project.fileCount} indexed files · {project.checkedFiles} files checked · {project.inspectionComplete ? 'Directory inspection complete' : 'Directory inspection incomplete'}
-          {project.issues.some((item) => item.severity === 'blocker') || plan.issues.some((item) => item.severity === 'blocker') ? ' · Blocked' : ' · Preview only; not approved for migration'}</p>
-        <p className="small-note">Category: {project.category ?? 'Uncategorized'} · {project.sourceCount} approved sources. Project, asset, version, and print-request references are unchanged.</p>
-        <Issues items={project.issues} />
-        <details><summary>File mappings ({project.files.length})</summary>
-          <ul className="library-file-mappings">{project.files.map((file) => <li key={file.id}>
-            <code>{file.sourcePath}</code><span> to </span><code>{project.destinationPath}/{file.destinationPath}</code>
-            <small>Asset {file.id} · Version {file.versionId ?? 'Missing'} · Indexed SHA-256 {file.contentHash ?? 'Missing'} · {byteLabel(file.sizeBytes)}</small>
-          </li>)}</ul>
-        </details>
-      </article>)}
+      {plan.projects.map((project) => <ProjectPreview project={project} key={project.id}
+        blockedByPlan={plan.issues.some((item) => item.severity === 'blocker')} />)}
+      <details className="library-technical-details">
+        <summary>Snapshot technical details</summary>
+        <dl><div><dt>Snapshot ID</dt><dd>{plan.id}</dd></div>
+          <div><dt>Catalog fingerprint</dt><dd>{plan.fingerprint}</dd></div>
+          <div><dt>Additional copy bytes (lower bound)</dt><dd>{byteLabel(plan.additionalBytes)}</dd></div>
+          <div><dt>Available storage bytes</dt><dd>{byteLabel(plan.availableBytes)}</dd></div></dl>
+      </details>
     </section>}
   </main>;
 }

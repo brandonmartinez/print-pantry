@@ -270,6 +270,15 @@ remain in place; changing classification does not imply moving files. Internal
 filenames, variants, linked resources, and empty directories retain their
 relative layout rather than being reorganized by extension.
 
+Each project has a clear inspection-status badge, file-check summary, and
+separate **Current folder** / **Proposed folder** boxes. **Blockers** and advisory
+**Notes** appear in separate groups. Under **Files**, paths are relative to those
+folders; differing paths are shown explicitly. Sizes use readable units, with
+exact byte counts available on hover and in collapsed technical details. Asset,
+version, project, and snapshot IDs, full paths, and indexed hashes are kept in
+technical details rather than repeated in the main review. An inspection-complete
+badge is not content verification or migration approval.
+
 Inspection is explicitly limited to 25 projects, 1,000 indexed files,
 2,000 filesystem entries across the batch (including existing managed
 destination directory entries), 12 relative-path components, and an 8 MiB saved
