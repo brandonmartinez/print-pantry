@@ -1,6 +1,6 @@
 {
   "name": "Print Pantry",
-  "dockerComposeFile": "../compose.dev.yml",
+  "dockerComposeFile": ["../compose.dev.yml", "compose.yml"],
   "service": "app",
   "workspaceFolder": "/workspace",
   "remoteUser": "node",

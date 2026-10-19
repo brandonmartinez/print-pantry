@@ -210,6 +210,13 @@ household database or actual library.
 
 ## Development container
 
+The image uses Microsoft's Node/Bookworm dev-container base rather than the
+minimal Node slim image. It includes Git, GitHub CLI (`gh`), curl/wget, jq,
+ripgrep, OpenSSH, Bash/Zsh, Python 3, native build tools, and standard shell
+utilities. Node **24.13.1** and its bundled npm are copied from the pinned
+official Node image, so the broader development base does not change the
+repository's runtime version.
+
 Docker Engine with Compose is required. Copy `.env.example` to ignored `.env`
 and set `HOST_NPM_CONFIG_FILE` to the absolute path of your existing npm user
 configuration (find it with `npm config get userconfig`). Compose refuses to
@@ -226,6 +233,25 @@ installation runs as the non-root `node` user after the container starts,
 never during image build. Local `npm ci` uses your configured registry; the
 lockfile has no registry-specific tarball URLs. GitHub-hosted CI uses the
 runner's configured registry, not your machine's private config.
+
+The host Git config defaults to `$HOME/.gitconfig`; set `HOST_GIT_CONFIG_FILE`
+in `.env` if you use another location, such as `$HOME/.config/git/config`.
+Compose requires an existing regular file and mounts it **read-only** at
+`/run/pantry-host-gitconfig`. Git includes it through the container's system
+config, so host identity and preferences are available to Dev Containers,
+`docker compose exec`, and SSH sessions. The file is never copied into the
+image. Container-global and repository-local settings can override these
+defaults without modifying the host file. Only `/workspace` is trusted for
+host/container bind-mount ownership differences; no wildcard trust is added.
+
+Host-specific paths in Git config do not become portable automatically:
+additional `include` files, global ignore files, signing programs, and macOS
+credential-helper executables need container-compatible paths or explicit
+read-only mounts. Do not mount your whole home directory or private keys.
+VS Code Dev Containers provides its own host credential-helper and SSH-agent
+forwarding; plain Compose/SSH sessions can use the opt-in SSH-agent forwarding
+described below. GitHub CLI authentication is separate and is not copied from
+the host.
 
 The development Docker image only installs Debian packages. If a later
 **production build** runs `npm ci` in a Dockerfile, supply the same external
@@ -249,7 +275,9 @@ cp "$HOME/.ssh/id_ed25519.pub" "$HOME/.config/print-pantry/authorized_keys"
 # SSH_AUTHORIZED_KEYS_FILE=/absolute/path/to/authorized_keys
 docker compose -f compose.dev.yml up -d --build
 docker compose -f compose.dev.yml ps
-docker compose -f compose.dev.yml exec app npm test
+docker compose -f compose.dev.yml exec -u node app npm ci
+docker compose -f compose.dev.yml exec -u node app npm run build
+docker compose -f compose.dev.yml exec -u node app npm test
 ```
 
 Open **http://127.0.0.1:5173** for the shell and
@@ -266,9 +294,29 @@ empty synthetic directory. Do not use a real library for tests.
 
 Open this repository using **Dev Containers: Reopen in Container**. The
 `.devcontainer/devcontainer.json` joins the same Compose application with
-`/workspace` as the workspace and `node` as the remote user. The app service
-starts dependencies, builds, migrates, and runs both watchers. For an SSH-based
-agent workspace, use a client key matching the public key supplied above:
+`/workspace` as the workspace and `node` as the remote user. Container creation
+runs `npm ci`; the app service stays available without starting watchers.
+Run `npm run dev` in the container to build shared packages, migrate, seed the
+local account, and start the API/web watchers. After image or mount changes,
+use **Dev Containers: Rebuild Container**, or recreate the app with
+`docker compose -f compose.dev.yml up -d --build app` and then restart
+`npm run dev`. Rebuilding the app preserves the database and other named
+volumes.
+
+Dev Containers also loads `.devcontainer/compose.yml`. It declares the CLI's
+generated feature directory under `${TMPDIR:-/tmp}/devcontainercli/container-features`
+as an additional build context. Compose 5.6 / Buildx 0.37 require explicit
+filesystem read access when VS Code generates `Dockerfile-with-features`
+outside the repository; without this context, a rebuild (including **Rebuild
+Container Without Cache**) fails with `additional privileges requested` and
+`--allow=fs.read=.../Dockerfile-with-features`. This grants access only to the
+generated feature directory, without disabling Bake's filesystem checks.
+Plain Compose commands continue to use only `compose.dev.yml`; the extra
+context is needed only for Dev Containers builds. On macOS/Linux, keep
+`TMPDIR` consistent between VS Code and Compose (the default is sufficient).
+
+For an SSH-based agent workspace, use a client key matching the public key
+supplied above:
 
 ```sh
 ssh -F /dev/null -p 2222 -i /path/to/private-key node@127.0.0.1

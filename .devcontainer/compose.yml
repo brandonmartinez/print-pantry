@@ -1,0 +1,6 @@
+services:
+  app:
+    build:
+      # Compose grants Bake read access to declared local build contexts.
+      additional_contexts:
+        devcontainer-features: ${TMPDIR:-/tmp}/devcontainercli/container-features

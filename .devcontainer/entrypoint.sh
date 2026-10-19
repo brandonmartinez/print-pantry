@@ -6,6 +6,14 @@ if [ ! -s /var/lib/ssh-host-keys/ssh_host_ed25519_key ]; then
 fi
 chmod 600 /var/lib/ssh-host-keys/ssh_host_ed25519_key
 chown node:node /workspace/node_modules /home/node/.npm
+if ! gosu node test -f /run/pantry-host-gitconfig || ! gosu node test -r /run/pantry-host-gitconfig; then
+  echo "HOST_GIT_CONFIG_FILE must provide a regular Git config readable by node." >&2
+  exit 1
+fi
+if ! gosu node git config --file /run/pantry-host-gitconfig --list >/dev/null; then
+  echo "HOST_GIT_CONFIG_FILE must provide a valid Git config." >&2
+  exit 1
+fi
 if ! gosu node test -r /home/node/.npmrc || ! gosu node test -s /home/node/.npmrc; then
   echo "HOST_NPM_CONFIG_FILE must provide a nonempty npm config readable by node." >&2
   exit 1

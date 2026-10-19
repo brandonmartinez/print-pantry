@@ -29,6 +29,12 @@ services:
       - pantry_node_modules:/workspace/node_modules
       - pantry_npm_cache:/home/node/.npm
       - pantry_ssh_host_keys:/var/lib/ssh-host-keys
+      - type: bind
+        source: ${HOST_GIT_CONFIG_FILE:-${HOME}/.gitconfig}
+        target: /run/pantry-host-gitconfig
+        read_only: true
+        bind:
+          create_host_path: false
       - ${SSH_AUTHORIZED_KEYS_FILE:-./.devcontainer/authorized_keys.example}:/run/pantry-authorized-keys:ro
       - ${HOST_NPM_CONFIG_FILE:?Set HOST_NPM_CONFIG_FILE to your existing external npm user config}:/home/node/.npmrc:ro
       - ${HOST_NPM_CA_FILE:-./.devcontainer/ca.example.pem}:/run/pantry-npm-ca.pem:ro
