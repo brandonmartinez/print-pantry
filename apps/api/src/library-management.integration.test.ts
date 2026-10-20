@@ -30,6 +30,18 @@ const indexer = {
   rescan: async () => { throw new Error('Dry run tests never scan a library'); },
 };
 const headers = (operator = true) => ({ cookie: cookies[operator ? 0 : 1] });
+async function historicalRequest(app: ReturnType<typeof buildServer>, projectId: string, assetId: string, versionId: string) {
+  await pool.query("UPDATE projects SET storage_kind='managed' WHERE id=$1", [projectId]);
+  await pool.query("UPDATE assets SET storage_kind='managed' WHERE project_id=$1", [projectId]);
+  try {
+    return await app.inject({ method: 'POST', url: '/requests', headers: headers(false), payload: {
+      projectId, selected: [{ assetId, versionId }], quantity: 1,
+    } });
+  } finally {
+    await pool.query("UPDATE projects SET storage_kind='legacy' WHERE id=$1", [projectId]);
+    await pool.query("UPDATE assets SET storage_kind='legacy' WHERE project_id=$1", [projectId]);
+  }
+}
 const base = '/library/reorganization-plans';
 
 beforeAll(async () => {
@@ -186,16 +198,14 @@ describe('read-only library management and saved migration dry runs', () => {
       extraRoots.push(isolated);
       const realIndexer = createLibraryIndexer({ db: createDatabase(pool), root: isolated });
       const configured = buildServer(pool, { pool, root: isolated, managedRoot, indexer: realIndexer, secureCookie: false,
-        clientMountPrefix: '/synthetic-legacy', managedClientMountPrefix: '/synthetic-managed' });
+        managedClientMountPrefix: '/synthetic-managed' });
       try {
         const id = String(9007199254740993n + BigInt(`0x${randomUUID().replaceAll('-', '').slice(0, 10)}`));
         const owner = await project(`${prefix}/Migrated Holder`, 'legacy', id, isolated);
         const file = await asset(owner, 'models/Small/part.stl', isolated);
         await mkdir(join(isolated, owner.relativePath, 'empty-docs'));
         await writeFile(join(isolated, owner.relativePath, '.DS_Store'), 'Retained OS metadata');
-        const submitted = await configured.inject({ method: 'POST', url: '/requests', headers: headers(false), payload: {
-          projectId: owner.id, selected: [{ assetId: file.id, versionId: file.versionId }], quantity: 1,
-        } });
+        const submitted = await historicalRequest(configured, owner.id, file.id, file.versionId);
         expect(submitted.statusCode).toBe(201);
         const requestId = submitted.json().request.id;
         const before = await catalogSnapshot(owner.id);
@@ -443,9 +453,7 @@ describe('read-only library management and saved migration dry runs', () => {
     const file = await asset(owner);
     await mkdir(join(root, owner.relativePath, 'empty-folder'));
     await writeFile(join(root, owner.relativePath, '.DS_Store'), 'Retained OS bytes');
-    const submitted = await server.inject({ method: 'POST', url: '/requests', headers: headers(false), payload: {
-      projectId: owner.id, selected: [{ assetId: file.id, versionId: file.versionId }], quantity: 1,
-    } });
+    const submitted = await historicalRequest(server, owner.id, file.id, file.versionId);
     expect(submitted.statusCode).toBe(201);
     const before = await catalogSnapshot(owner.id);
     const destinationBefore = await readdir(managedRoot, { recursive: true });

@@ -79,7 +79,7 @@ function publicPreview(row: PreviewRow): SourceDiscoveryPreview {
 
 export function registerSourceDiscovery(
   server: FastifyInstance, pool: Pool, auth: ReturnType<typeof createAuth>,
-  roots: { root: string; managedRoot?: string },
+  roots: { root?: string; managedRoot?: string },
 ) {
   const rootOf = (project: Inputs['project']) => project.storage_kind === 'managed' ? roots.managedRoot : roots.root;
   async function operation<T>(id: string, reply: FastifyReply, work: (client: PoolClient) => Promise<T>) {

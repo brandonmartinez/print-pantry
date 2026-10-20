@@ -121,7 +121,8 @@ function AddPrint({ onSubmitted }: { onSubmitted: (result: { request: ImportRequ
         <SourceMetadata source={match.source} />
         {match.projects.length > 0 && <>
           <p>This source matches the library. View a project before requesting another import:</p>
-          <ul>{match.projects.map((project) => <li key={project.id}><Link to={`/projects/${encodeURIComponent(project.id)}`}>View {project.name}</Link>{!project.available && ' — unavailable'}</li>)}</ul>
+          <ul>{match.projects.map((project) => <li key={project.id}>{project.storageKind === 'legacy' ?
+            <>{project.name} — legacy, migration required</> : <><Link to={`/projects/${encodeURIComponent(project.id)}`}>View {project.name}</Link>{!project.available && ' — unavailable'}</>}</li>)}</ul>
           <label className="import-existing"><input type="checkbox" checked={allowExisting} disabled={busy} onChange={(event) => setAllowExisting(event.target.checked)} />Submit anyway: I need different or missing files.</label>
         </>}
         {match.pending && <p className="notice notice-success">An active import is already {labels[match.pending.status].toLowerCase()}. Submitting will join that shared import, preserving your source link and notes. An operator’s decision affects everyone following it.</p>}

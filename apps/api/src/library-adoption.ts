@@ -114,6 +114,8 @@ export function createLibraryAdoptionService(pool: Pool, options: CatalogOptions
       return { items, nextCursor: rows.length > 50 ? items.at(-1)!.projectId : null };
     },
     create: async (id: string, actorId: string) => {
+      const legacyRoot = options.root;
+      if (!legacyRoot) throw new MigrationStorageError('Configure LEGACY_LIBRARY_ROOT to migrate an existing library', 503);
       const previous = (await pool.query<Run>('SELECT * FROM library_adoption_runs WHERE id=$1', [id])).rows[0];
       if (previous) return publicRun(pool, previous);
       const identities = await migrationStorageIdentity(options);
@@ -125,10 +127,10 @@ export function createLibraryAdoptionService(pool: Pool, options: CatalogOptions
         const claim = (await client.query<{ locked: boolean }>('SELECT pg_try_advisory_xact_lock($1) AS locked', [libraryMutationLock])).rows[0].locked;
         if (!claim) throw new MigrationBusyError('A scan or storage operation is running; retry planning later', 409);
         const active = await client.query(`SELECT id FROM library_adoption_runs WHERE legacy_root=$1 AND managed_root=$2
-          AND state NOT IN ('completed','partial','canceled','restored') LIMIT 1`, [resolve(options.root), resolve(managedRoot)]);
+          AND state NOT IN ('completed','partial','canceled','restored') LIMIT 1`, [resolve(legacyRoot), resolve(managedRoot)]);
         if (active.rowCount) throw new IntakeError('An adoption run already exists for these roots; reopen or cancel it first', 409);
         await client.query(`INSERT INTO library_adoption_runs(id,created_by,actor_id,legacy_root,managed_root,root_identities,available_bytes,history)
-          VALUES($1,$2,$2,$3,$4,$5,$6,$7)`, [id, actorId, resolve(options.root), resolve(managedRoot),
+          VALUES($1,$2,$2,$3,$4,$5,$6,$7)`, [id, actorId, resolve(legacyRoot), resolve(managedRoot),
           JSON.stringify(identities), String(disk.bavail * disk.bsize), JSON.stringify([{ action: 'plan', actorId, at: new Date().toISOString() }])]);
         const inventory = await client.query(`INSERT INTO library_adoption_items(run_id,project_id,name,size_bytes,file_count)
           SELECT $1,p.id,p.name,(SELECT coalesce(sum(a.size_bytes),0)::text FROM assets a WHERE a.project_id=p.id),

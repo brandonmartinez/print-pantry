@@ -33,7 +33,11 @@ let requesterCookie: string;
 let otherCookie: string;
 
 async function scan() {
+  await pool.query("UPDATE projects SET storage_kind='legacy' WHERE relative_path LIKE $1", [`${prefix}/%`]);
+  await pool.query("UPDATE assets SET storage_kind='legacy' WHERE project_id IN (SELECT id FROM projects WHERE relative_path LIKE $1)", [`${prefix}/%`]);
   const result = await indexer.rescan();
+  await pool.query("UPDATE projects SET storage_kind='managed' WHERE relative_path LIKE $1", [`${prefix}/%`]);
+  await pool.query("UPDATE assets SET storage_kind='managed' WHERE project_id IN (SELECT id FROM projects WHERE relative_path LIKE $1)", [`${prefix}/%`]);
   scanIds.push(result.id);
   return result;
 }
@@ -97,7 +101,7 @@ beforeAll(async () => {
      ($1,$2,$7,'operator'), ($3,$4,$7,'requester'), ($5,$6,$7,'requester')`,
     [randomUUID(), operatorName, randomUUID(), requesterName, randomUUID(), otherName, hash],
   );
-  server = buildServer(pool, { pool, root, indexer, secureCookie: false });
+  server = buildServer(pool, { pool, root, managedRoot: root, indexer, secureCookie: false });
   operatorCookie = await login(operatorName);
   requesterCookie = await login(requesterName);
   otherCookie = await login(otherName);
@@ -326,14 +330,15 @@ describe('request submission and ownership', () => {
     await rename(root, offlineRoot);
     try {
       expect((await scan()).status).toBe('offline');
+      await pool.query("UPDATE projects SET storage_kind='legacy' WHERE id=$1", [projectId]);
       expect((await server.inject({ url: `/requests/${requestId}`, headers: { cookie: requesterCookie } })).json().request)
         .toMatchObject({ selected: [{ name: 'part 02.stl', versionId }], history: [{ action: 'submit' }] });
       const offline = (await server.inject({ url: `/requests/${healthyRequest.json().request.id}`,
         headers: { cookie: requesterCookie } })).json().request;
       expect(offline.selected[0]).toMatchObject({
-        available: false, unavailableReason: 'library_offline', downloadUrl: null,
+        available: false, unavailableReason: 'migration_required', downloadUrl: null,
       });
-      expect((await submit()).statusCode).toBe(503);
+      expect((await submit()).statusCode).toBe(409);
     } finally {
       await rename(offlineRoot, root);
     }
@@ -342,7 +347,7 @@ describe('request submission and ownership', () => {
   it('allows managed requests and snapshots after an unrelated legacy mount goes offline', async () => {
     const managedProject = (await pool.query<{ id: string }>(
       `INSERT INTO projects (storage_kind, relative_path, name)
-       SELECT 'managed', relative_path, 'Explicit managed print project' FROM projects WHERE id = $1 RETURNING id`,
+       SELECT 'managed', relative_path || '/Explicit managed', 'Explicit managed print project' FROM projects WHERE id = $1 RETURNING id`,
       [projectId],
     )).rows[0].id;
     const managedAsset = randomUUID();
@@ -363,7 +368,8 @@ describe('request submission and ownership', () => {
     await rename(root, offlineRoot);
     try {
       expect((await scan()).status).toBe('offline');
-      expect((await submit()).statusCode).toBe(503);
+      await pool.query("UPDATE projects SET storage_kind='legacy' WHERE id=$1", [projectId]);
+      expect((await submit()).statusCode).toBe(409);
       const created = await submit([{ assetId: managedAsset, versionId: managedVersion }], { projectId: managedProject });
       expect(created.statusCode).toBe(201);
       const request = created.json().request;
@@ -383,9 +389,9 @@ describe('request submission and ownership', () => {
       const legacySnapshot = (await server.inject({
         url: `/requests/${request.id}`, headers: { cookie: requesterCookie },
       })).json().request.selected[0];
-      expect(legacySnapshot).toMatchObject({ available: false, unavailableReason: 'library_offline' });
+      expect(legacySnapshot).toMatchObject({ available: false, unavailableReason: 'migration_required' });
       expect((await submit([{ assetId: managedAsset, versionId: managedVersion }], { projectId: managedProject })).statusCode)
-        .toBe(503);
+        .toBe(409);
     } finally {
       await rename(offlineRoot, root);
     }

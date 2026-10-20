@@ -39,6 +39,7 @@ export interface LibraryManagementProject {
   fileCount: number;
   sizeBytes: string;
   sourceCount: number;
+  isBoundary?: boolean;
 }
 
 export interface LibraryPlanIssue {
@@ -258,7 +259,7 @@ export interface PrintRequestSummary {
 }
 
 export type PrintRequestUnavailableReason =
-  'project_missing' | 'asset_missing' | 'version_missing' | 'version_not_current' | 'library_offline';
+  'project_missing' | 'asset_missing' | 'version_missing' | 'version_not_current' | 'migration_required';
 
 export interface PrintRequestFile extends PrintRequestSelection {
   name: string;
@@ -324,7 +325,7 @@ export interface ImportPlan {
   metadata: ImportMetadata;
   files: ImportPlanFile[];
   warnings: string[];
-  duplicates: Array<{ projectId: string; name: string; matchingFiles: number }>;
+  duplicates: Array<{ projectId: string; name: string; matchingFiles: number; storageKind?: 'managed' | 'legacy' }>;
 }
 
 export interface ImportIntake {
@@ -381,7 +382,7 @@ export interface ImportRequest {
 
 export interface ImportMatch {
   source: ImportSource;
-  projects: Array<{ id: string; name: string; available: boolean }>;
+  projects: Array<{ id: string; name: string; available: boolean; storageKind?: 'managed' | 'legacy' }>;
   pending: { id: string; status: ImportStatus } | null;
 }
 

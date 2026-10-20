@@ -9,7 +9,7 @@ import { createLibraryIndexer } from '@print-pantry/indexer';
 
 const indexer = createLibraryIndexer({
   db,
-  root: process.env.LIBRARY_ROOT!,
+  root: process.env.LEGACY_LIBRARY_ROOT!,
   ignoredDirectoryNames: ['recovery', 'temp', 'private'],
   hashConcurrency: 4,
 });

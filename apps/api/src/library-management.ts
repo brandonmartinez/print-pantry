@@ -20,6 +20,7 @@ export type LibraryProjectRow = {
   category: string | null; category_id: string | null; missing_at: Date | null;
   description: string | null; tags: string[]; designer: string | null; source_url: string | null;
   license: string | null; notes: string | null; file_count: number; size_bytes: string; source_count: number;
+  is_boundary: boolean;
 };
 export type LibraryFileRow = {
   id: string; current_version_id: string | null; relative_path: string; project_relative_path: string;
@@ -30,6 +31,7 @@ export type LibraryFileRow = {
 export const libraryPreviewLimits = { projects: 25, files: 1000, entries: 2000, depth: 12, bytes: 8 * 1024 * 1024 };
 const uuid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 export const libraryProjectSelect = `SELECT p.*,c.relative_path AS category,
+  EXISTS (SELECT 1 FROM project_boundary_overrides o WHERE o.relative_path=p.relative_path) AS is_boundary,
   (SELECT count(*)::int FROM assets a WHERE a.project_id=p.id) AS file_count,
   (SELECT coalesce(sum(a.size_bytes),0)::text FROM assets a WHERE a.project_id=p.id) AS size_bytes,
   (SELECT count(*)::int FROM project_sources s WHERE s.project_id=p.id) AS source_count
@@ -43,7 +45,7 @@ function summary(row: LibraryProjectRow): LibraryManagementProject {
   return {
     id: row.id, name: row.name, storageKind: row.storage_kind, relativePath: row.relative_path,
     category: row.category, available: !row.missing_at, fileCount: row.file_count,
-    sizeBytes: row.size_bytes, sourceCount: row.source_count,
+    sizeBytes: row.size_bytes, sourceCount: row.source_count, isBoundary: row.is_boundary,
   };
 }
 function issue(issues: LibraryPlanIssue[], code: string, text: string, relativePath: string | null = null, severity: LibraryPlanIssue['severity'] = 'blocker') {
@@ -193,6 +195,7 @@ export function registerLibraryManagement(
 }
 
 export async function createLibraryPreview(pool: Pool, options: CatalogOptions, projectIds: string[], actorId: string, scalableDestination = false) {
+    if (!options.root) throw new IntakeError('Configure LEGACY_LIBRARY_ROOT to plan migration of an existing library', 503);
     if (!projectIds.length || projectIds.length > libraryPreviewLimits.projects || new Set(projectIds).size !== projectIds.length || projectIds.some((id) => !isProjectId(id))) {
       throw new IntakeError('Invalid project selection', 400);
     }

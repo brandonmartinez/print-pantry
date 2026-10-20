@@ -175,10 +175,9 @@ describe('household import intake and operator queue', () => {
       [projectId, `${prefix}/legacy`, 'Legacy holder', url],
     );
     const match = await check(`https://makerworld.com/en/models/${modelId}7-renamed#profileId-12`);
-    expect(match.json().projects).toEqual([{ id: projectId, name: 'Legacy holder', available: true }]);
+    expect(match.json().projects).toEqual([{ id: projectId, name: 'Legacy holder', available: false, storageKind: 'legacy' }]);
     const detail = await server.inject({ url: `/catalog/projects/${projectId}`, headers: headers() });
-    expect(detail.statusCode).toBe(200);
-    expect(detail.json().project.id).toBe(projectId);
+    expect(detail.statusCode).toBe(404);
     expect((await server.inject({ url: '/catalog/projects/9223372036854775808', headers: headers() })).statusCode).toBe(404);
     expect((await server.inject({ method: 'PATCH', url: '/catalog/projects/9223372036854775808',
       headers: headers(0), payload: { notes: 'Overflow' } })).statusCode).toBe(400);

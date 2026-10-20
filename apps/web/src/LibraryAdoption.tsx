@@ -166,8 +166,8 @@ export function LibraryAdoption({ request, legacyCount, refresh, onStorageChange
           onClick={() => setConfirmation('restore')}>Restore activated projects</button>}
       </div>
       {confirmation && <div className="notice">
-        <p>{confirmation === 'activate' ? `Activate ${run.counts.copied} verified projects? Downloads and requests will switch to managed copies. Originals are retained; blocked and failed projects are not activated.` :
-          confirmation === 'restore' ? `Restore ${run.counts.activated} activated projects to their retained originals? Both copies must still verify. Managed copies and later display metadata are retained.` :
+        <p>{confirmation === 'activate' ? `Make ${run.counts.copied} verified projects available in the live library? Downloads and requests will use managed copies. Originals are retained; blocked and failed projects are not activated.` :
+          confirmation === 'restore' ? `Restore ${run.counts.activated} activated projects to migration-only legacy storage? They will disappear from the live library and their print files become unavailable. Both copies must still verify. Managed copies and later display metadata are retained.` :
           'Cancel remaining unactivated work? Copies are retained and already activated projects stay managed.'}</p>
         <div className="library-management-actions"><button type="button" className="button button-primary" disabled={busy}
           onClick={() => void command(confirmation === 'activate' ? 'activate' : confirmation === 'restore' ? 'restore' : 'cancel')}>
@@ -189,7 +189,7 @@ export function LibraryAdoption({ request, legacyCount, refresh, onStorageChange
         <option value="">All projects</option>{Object.entries(itemLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select></label></div>
       <ul className="library-adoption-items">{items?.items.map((item) => <li key={item.projectId}>
-        <div className="library-plan-project-heading"><Link to={`/projects/${item.projectId}`}>{item.name}</Link>
+        <div className="library-plan-project-heading">{item.status === 'activated' ? <Link to={`/projects/${item.projectId}`}>{item.name}</Link> : <strong>{item.name}</strong>}
           <span className={`library-preview-status ${item.status === 'blocked' || item.status === 'failed' ? 'is-blocked' : ''}`}>{itemLabels[item.status]}</span></div>
         <p className="small-note">Project #{item.projectId} · {item.fileCount} files</p>
         {item.planId && <Link to={`?plan=${encodeURIComponent(item.planId)}`}>Review saved project plan</Link>}

@@ -35,6 +35,7 @@ function setup(options: { initial?: string; data?: LibraryManagementResponse; sa
   let saved = structuredClone(options.saved ?? plan);
   let job = saved.migration ?? structuredClone(initialJob);
   const request = vi.fn(async (path: string, init?: RequestInit) => {
+    if (path === '/api/library/legacy-scan') return { configured: false, scan: { state: 'never', lastError: null, errors: [] } };
     if (path === '/api/library/adoptions') return { runs: [] };
     if (path.includes('/migrations/')) {
       if (init?.method === 'POST') {
@@ -68,6 +69,17 @@ function setup(options: { initial?: string; data?: LibraryManagementResponse; sa
   return request;
 }
 afterEach(cleanup);
+it('keeps source recovery and boundary actions in explicit legacy migration tools', async () => {
+  const request = setup();
+  await screen.findByText('Legacy holder');
+  expect(screen.queryByRole('link', { name: 'Open project / manage sources' })?.getAttribute('href')).toBe('/projects/42');
+  fireEvent.click(screen.getByRole('button', { name: 'Show migration tools' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Set project boundary' }));
+  await screen.findByText(/Boundary saved/);
+  expect(request).toHaveBeenCalledWith('/api/library/legacy-boundaries', {
+    method: 'PUT', body: JSON.stringify({ projectId: '9007199254740993', isBoundary: true }),
+  });
+});
 
 it('lists storage kinds without scanning, auto-selecting projects, or permitting managed-project migration', async () => {
   const request = setup();
@@ -76,7 +88,7 @@ it('lists storage kinds without scanning, auto-selecting projects, or permitting
   expect(screen.getByRole('checkbox', { name: 'Select Legacy holder' })).toHaveProperty('checked', false);
   expect(screen.getByRole('checkbox', { name: 'Select Managed tray' })).toHaveProperty('disabled', true);
   expect(screen.getByText(/No files are copied, renamed, deleted, or activated/)).toBeTruthy();
-  expect(request.mock.calls.every(([path, init]) => (path.startsWith('/api/library/management?') || path === '/api/library/adoptions') && !init?.method)).toBe(true);
+  expect(request.mock.calls.every(([path, init]) => (path.startsWith('/api/library/management?') || path === '/api/library/adoptions' || path === '/api/library/legacy-scan') && !init?.method)).toBe(true);
 });
 
 it('previews only selected decimal-string IDs, persists the URL, and never calls an activation endpoint', async () => {
@@ -170,7 +182,8 @@ it.each([
   expect(view.getByRole('region', { name: 'Notes (1)' }).textContent).toContain('Review source associations');
   expect(view.queryByRole('region', { name: /Blockers/ })).toBeNull();
   expect(view.queryByText('Blocked')).toBeNull();
-  expect(view.getByRole('link', { name: 'Review sources' }).getAttribute('href')).toBe('/projects/9007199254740993');
+  expect(view.getByText(/Review sources using the inventory migration tools/)).toBeTruthy();
+  expect(view.queryByRole('link', { name: 'Review sources' })).toBeNull();
   const available = screen.getByText('Available managed storage').parentElement!;
   expect(within(available).getByText('Unknown')).toBeTruthy();
 });
@@ -255,7 +268,7 @@ it('requires two unchecked acknowledgements, approves only, then copies and acti
   }) });
   expect(request.mock.calls.filter(([, init]) => init?.method)).toHaveLength(1);
   fireEvent.click(screen.getByRole('button', { name: 'Copy and verify' }));
-  await screen.findByText('Copy verified; legacy still active');
+  await screen.findByText('Copy verified; awaiting activation');
   expect(request).toHaveBeenCalledWith(`/api/library/migrations/migration-job/projects/${plan.projects[0].id}`, {
     method: 'POST', body: JSON.stringify({ expectedRevision: 0, action: 'copy' }),
   });
@@ -297,7 +310,7 @@ it('requires cancellation confirmation and does not resume canceled work', async
   fireEvent.click(await screen.findByRole('button', { name: 'Cancel remaining migration' }));
   expect(request.mock.calls.every(([, init]) => !init?.method)).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: 'Confirm cancellation' }));
-  await screen.findByText('Canceled; legacy still active');
+  await screen.findByText('Canceled; source retained');
   expect(screen.queryByRole('button', { name: 'Copy and verify' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Approve migration' })).toBeNull();
   expect(request).toHaveBeenCalledWith('/api/library/migrations/migration-job/cancel', { method: 'POST', body: '{"expectedRevision":0}' });
@@ -310,7 +323,7 @@ it('requires confirmation to restore an activated project even when remaining wo
   fireEvent.click(await screen.findByRole('button', { name: 'Restore legacy location' }));
   expect(request.mock.calls.every(([, init]) => !init?.method)).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: 'Confirm restoration' }));
-  await screen.findByText('Legacy restored; managed copy retained');
+  await screen.findByText('Legacy restored; hidden from live library');
   expect(request).toHaveBeenCalledWith(`/api/library/migrations/migration-job/projects/${plan.projects[0].id}`, {
     method: 'POST', body: JSON.stringify({ expectedRevision: 7, action: 'restore' }),
   });

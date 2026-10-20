@@ -129,6 +129,56 @@ it('requires operator access on all routes and refuses copying/activation withou
   expect((await pool.query('SELECT storage_kind FROM projects WHERE id=$1', [ids[0]])).rows[0].storage_kind).toBe('legacy');
 });
 
+it('keeps legacy projects migration-only and serves activated copies without any legacy configuration', async () => {
+  const owner = await project();
+  const paths = [`/catalog/projects/${owner.id}`, `/catalog/projects/${owner.id}/preview`,
+    ...['download', 'preview', 'geometry'].map((action) => `/catalog/assets/${owner.assetId}/${action}`)];
+  for (const url of paths) expect((await server.inject({ url, headers: headers() })).statusCode).toBe(404);
+  const listing = (await server.inject({ url: '/catalog/projects?q=Synthetic', headers: headers() })).json();
+  expect(listing.items.some((item: { id: string }) => item.id === owner.id)).toBe(false);
+  expect((await server.inject({ method: 'PATCH', url: `/catalog/projects/${owner.id}`, headers: headers(), payload: { notes: 'Must not edit through ordinary catalog' } })).statusCode).toBe(404);
+  const rejected = await server.inject({ method: 'POST', url: '/requests', headers: { cookie: requesterCookie },
+    payload: { projectId: owner.id, selected: [{ assetId: owner.assetId, versionId: owner.versionId }], quantity: 1 } });
+  expect(rejected.statusCode).toBe(409);
+  expect(rejected.json().error).toContain('migrated');
+  const inventory = (await server.inject({ url: '/library/management', headers: headers() })).json();
+  expect(inventory.items.some((item: { id: string }) => item.id === owner.id)).toBe(true);
+  const run = await create(); await drain(run.id);
+  await command(run.id, 'approve_copy'); await drain(run.id);
+  expect((await server.inject({ url: paths[0], headers: headers() })).statusCode).toBe(404);
+  await command(run.id, 'activate'); await drain(run.id);
+  const rescan = vi.fn(async () => { throw new Error('No legacy indexing should be attempted'); });
+  const managedOnly = buildServer(pool, { pool, managedRoot, secureCookie: false, indexer: { ...indexer, rescan } });
+  try {
+    expect((await managedOnly.inject({ url: paths[0], headers: headers() })).json().project.storageKind).toBe('managed');
+    const downloaded = await managedOnly.inject({ url: paths[2], headers: { cookie: requesterCookie } });
+    expect(downloaded.statusCode).toBe(200);
+    expect(downloaded.rawPayload).toEqual(owner.bytes);
+    expect((await managedOnly.inject({ url: '/library/legacy-scan', headers: headers() })).json().configured).toBe(false);
+    expect((await managedOnly.inject({ method: 'POST', url: '/library/legacy-scan', headers: headers() })).statusCode).toBe(503);
+    expect((await managedOnly.inject({ url: '/library/legacy-scan', headers: { cookie: requesterCookie } })).statusCode).toBe(403);
+    expect(rescan).not.toHaveBeenCalled();
+    await command(run.id, 'restore'); await drain(run.id);
+    expect((await managedOnly.inject({ url: paths[0], headers: headers() })).statusCode).toBe(404);
+    expect((await managedOnly.inject({ url: paths[2], headers: headers() })).statusCode).toBe(404);
+  } finally { await managedOnly.close(); }
+});
+
+it('reports asynchronous legacy indexing failures instead of returning an old successful scan state', async () => {
+  const rescan = vi.fn(async () => { throw new ScanInProgressError(); });
+  const configured = buildServer(pool, { pool, root, managedRoot, secureCookie: false, indexer: { ...indexer, rescan } });
+  try {
+    expect(rescan).not.toHaveBeenCalled();
+    expect((await configured.inject({ method: 'POST', url: '/library/legacy-scan', headers: headers() })).statusCode).toBe(202);
+    await vi.waitFor(async () => {
+      const result = (await configured.inject({ url: '/library/legacy-scan', headers: headers() })).json();
+      expect(result.scan.state).toBe('failed');
+      expect(result.scan.lastError).toBeTruthy();
+    });
+    expect(rescan).toHaveBeenCalledTimes(1);
+  } finally { await configured.close(); }
+});
+
 it('plans over 25 projects, paginates exact bigint IDs, and freezes membership without copying files', async () => {
   for (let i = 0; i < 51; i++) await project();
   const big = await project(String(9007199254740993n + BigInt(`0x${randomUUID().replaceAll('-', '').slice(0, 10)}`)));

@@ -85,8 +85,8 @@ function legacySourcePattern(source: ImportSource): string | null {
 }
 
 export async function findImportMatches(client: Connection, source: ImportSource): Promise<ImportMatch> {
-  const projects = await client.query<{ id: string; name: string; available: boolean }>(
-    `SELECT p.id, p.name, (p.missing_at IS NULL) AS available FROM projects p
+  const projects = await client.query<ImportMatch['projects'][number]>(
+    `SELECT p.id, p.name, p.storage_kind AS "storageKind", (p.storage_kind='managed' AND p.missing_at IS NULL) AS available FROM projects p
      WHERE EXISTS (SELECT 1 FROM project_sources s WHERE s.project_id = p.id AND s.source_key = $1)
         OR p.source_url = ANY($2::text[])
         OR ($3::text IS NOT NULL AND p.source_url ~* $3)

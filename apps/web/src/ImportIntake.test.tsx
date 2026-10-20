@@ -164,8 +164,10 @@ it('does not repeat an upload error already present in persisted intake state', 
 });
 
 it('requires saving every edit and explicitly confirming duplicates before publication', async () => {
-  const { calls } = setup({ prepared: true, plan: { ...plan, duplicates: [{ projectId: '42', name: 'Other tray', matchingFiles: 1 }] } });
+  const { calls } = setup({ prepared: true, plan: { ...plan, duplicates: [{ projectId: '42', name: 'Other tray', matchingFiles: 1, storageKind: 'legacy' }] } });
   await open();
+  expect(screen.queryByRole('link', { name: 'Other tray' })).toBeNull();
+  expect(screen.getByText(/Other tray.*migration required/)).toBeTruthy();
   const publish = () => screen.getByRole('button', { name: 'Publish to managed library' }) as HTMLButtonElement;
   expect(publish().disabled).toBe(true);
   fireEvent.click(screen.getByRole('checkbox', { name: /I reviewed the duplicates/ }));

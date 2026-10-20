@@ -13,7 +13,6 @@ type Pool = ReturnType<typeof createPool>;
 type Client = PoolClient;
 type Connection = Pool | Client;
 type Auth = ReturnType<typeof createAuth>;
-type Indexer = { getStatus(): { lastScan: { status: string } | null } };
 type RequestRow = {
   id: string; project_id: string; project_name: string; requester_id: string;
   username: string; role: User['role']; status: PrintRequestStatus; quantity: number;
@@ -143,18 +142,8 @@ async function requestRows(client: Connection, user: User, id?: string): Promise
   return result.rows;
 }
 
-async function latestScanStatus(client: Connection, indexer: Indexer): Promise<string | null> {
-  const current = indexer.getStatus().lastScan;
-  if (current) return current.status;
-  const scan = await client.query<{ status: string }>(
-    'SELECT status FROM scan_runs ORDER BY started_at DESC, id DESC LIMIT 1',
-  );
-  return scan.rows[0]?.status ?? null;
-}
-
-async function fileRows(client: Connection, ids: string[], indexer: Indexer): Promise<Map<string, PrintRequestFile[]>> {
+async function fileRows(client: Connection, ids: string[]): Promise<Map<string, PrintRequestFile[]>> {
   if (!ids.length) return new Map();
-  const offline = await latestScanStatus(client, indexer) === 'offline';
   const result = await client.query<FileRow>(
     `SELECT f.request_id, f.asset_id, f.version_id, f.name, f.relative_path,
             f.file_type, f.extension, f.size_bytes, f.content_hash,
@@ -173,12 +162,13 @@ async function fileRows(client: Connection, ids: string[], indexer: Indexer): Pr
   );
   const files = new Map<string, PrintRequestFile[]>();
   for (const row of result.rows) {
-    const unavailableReason = row.project_missing ? 'project_missing'
+    const unavailableReason = row.storage_kind !== 'managed' || row.project_storage_kind !== 'managed' ? 'migration_required'
+      : row.project_missing ? 'project_missing'
       : row.asset_missing ? 'asset_missing'
       : row.current_version_id && row.current_version_id !== row.version_id ? 'version_not_current'
       : row.version_missing ? 'version_missing'
       : row.current_version_id !== row.version_id ? 'version_not_current'
-      : offline && (row.storage_kind === 'legacy' || row.project_storage_kind === 'legacy') ? 'library_offline' : null;
+      : null;
     const item: PrintRequestFile = {
       assetId: row.asset_id, versionId: row.version_id, name: row.name,
       relativePath: row.relative_path, variant: variant(row.relative_path),
@@ -195,8 +185,8 @@ async function fileRows(client: Connection, ids: string[], indexer: Indexer): Pr
   return files;
 }
 
-async function summaries(client: Connection, rows: RequestRow[], indexer: Indexer): Promise<PrintRequestSummary[]> {
-  const files = await fileRows(client, rows.map((row) => row.id), indexer);
+async function summaries(client: Connection, rows: RequestRow[]): Promise<PrintRequestSummary[]> {
+  const files = await fileRows(client, rows.map((row) => row.id));
   return rows.map((row) => ({
     id: row.id, projectId: row.project_id, projectName: row.project_name,
     requester: { id: row.requester_id, username: row.username, role: row.role },
@@ -207,10 +197,10 @@ async function summaries(client: Connection, rows: RequestRow[], indexer: Indexe
   }));
 }
 
-async function detail(client: Connection, user: User, id: string, indexer: Indexer): Promise<PrintRequestDetail> {
+async function detail(client: Connection, user: User, id: string): Promise<PrintRequestDetail> {
   const rows = await requestRows(client, user, id);
   if (!rows.length) throw new RequestError(404, 'Request not found');
-  const [summary] = await summaries(client, rows, indexer);
+  const [summary] = await summaries(client, rows);
   const result = await client.query<HistoryRow>(
     `SELECT h.id, h.actor_id, u.username, u.role, h.action, h.from_status, h.to_status,
             h.from_position, h.to_position, h.note, h.created_at
@@ -247,7 +237,7 @@ async function reorder(client: Connection, orderedIds: string[], actorId: string
   }
 }
 
-async function queueView(client: Connection, indexer: Indexer): Promise<PrintRequestQueue> {
+async function queueView(client: Connection): Promise<PrintRequestQueue> {
   const state = await client.query<QueueState>('SELECT revision, selected_next_id FROM request_queue_state WHERE id = 1');
   if (!state.rows[0]) throw new Error('Request queue state is missing; apply database migrations');
   const rows = await client.query<RequestRow>(
@@ -258,7 +248,7 @@ async function queueView(client: Connection, indexer: Indexer): Promise<PrintReq
      WHERE r.status = 'queued' ORDER BY r.queue_position, r.id`,
   );
   return { revision: state.rows[0].revision, selectedNextId: state.rows[0].selected_next_id,
-    items: await summaries(client, rows.rows, indexer) };
+    items: await summaries(client, rows.rows) };
 }
 
 // submit: (none)->requested; approve: requested->queued; decline: requested->declined;
@@ -272,7 +262,7 @@ const transitions: Record<PrintRequestAction, { from: PrintRequestStatus[]; to: 
   cancel: { from: ['requested', 'queued'], to: 'canceled' },
 };
 
-export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth, indexer: Indexer) {
+export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth) {
   server.post<{ Body: SubmitPrintRequest }>('/requests', {
     preHandler: auth.authenticate,
     schema: { body: {
@@ -302,13 +292,12 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
     const user = auth.currentUser(request);
     try {
       const { value, revision } = await withQueueMutation(pool, undefined, async (client) => {
-        const offline = await latestScanStatus(client, indexer) === 'offline';
         const project = await client.query<{ name: string; missing_at: Date | null; storage_kind: 'legacy' | 'managed' }>(
           'SELECT name, missing_at, storage_kind FROM projects WHERE id = $1', [input.projectId],
         );
         if (!project.rows[0]) throw new RequestError(404, 'Project not found');
-        if (offline && project.rows[0].storage_kind === 'legacy') {
-          throw new RequestError(503, 'Library is offline; retry after a successful scan');
+        if (project.rows[0].storage_kind !== 'managed') {
+          throw new RequestError(409, 'Project must be migrated and activated in managed storage before requesting a print');
         }
         if (project.rows[0].missing_at) throw new RequestError(410, 'Project is unavailable; refresh the catalog');
         const files: AvailableFile[] = [];
@@ -325,8 +314,8 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
           );
           const file = result.rows[0];
           if (!file) throw new RequestError(400, 'Every selected file must belong to the chosen project');
-          if (offline && file.storage_kind === 'legacy') {
-            throw new RequestError(503, 'Library is offline; retry after a successful scan');
+          if (file.storage_kind !== 'managed') {
+            throw new RequestError(409, 'Selected file must be migrated to managed storage before requesting a print');
           }
           if (file.asset_missing || file.project_missing || !file.version_id ||
             file.version_missing || file.current_version_id !== item.versionId) {
@@ -359,7 +348,7 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
           );
         }
         await history(client, id, user.id, 'submit', null, 'requested', null, null);
-        return detail(client, user, id, indexer);
+        return detail(client, user, id);
       });
       return reply.code(201).send({ request: value, revision });
     } catch (error) {
@@ -370,7 +359,7 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
   server.get('/requests', { preHandler: auth.authenticate }, async (request) => {
     const user = auth.currentUser(request);
     return { items: await readQueue(pool, async (client) =>
-      summaries(client, await requestRows(client, user), indexer)) };
+      summaries(client, await requestRows(client, user))) };
   });
 
   server.get<{ Params: { id: string } }>('/requests/:id', {
@@ -378,14 +367,14 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
   }, async (request, reply) => {
     try {
       return { request: await readQueue(pool, (client) =>
-        detail(client, auth.currentUser(request), request.params.id, indexer)) };
+        detail(client, auth.currentUser(request), request.params.id)) };
     } catch (error) {
       return errorReply(reply, error);
     }
   });
 
   server.get('/requests/queue', { preHandler: auth.operatorOnly }, async () =>
-    readQueue(pool, (client) => queueView(client, indexer)));
+    readQueue(pool, (client) => queueView(client)));
 
   server.patch<{ Params: { id: string }; Body: {
     action: PrintRequestAction; note?: string | null; expectedRevision?: number;
@@ -439,7 +428,7 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
         }
         await history(client, request.params.id, user.id, action, row.status, transition.to,
           row.queue_position, position, text(request.body.note));
-        return detail(client, user, request.params.id, indexer);
+        return detail(client, user, request.params.id);
       });
       return { request: value, revision };
     } catch (error) {
@@ -464,7 +453,7 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
           throw new RequestError(409, 'Queue membership changed; refresh and submit every queued ID exactly once', state.revision);
         }
         await reorder(client, request.body.orderedIds, auth.currentUser(request).id);
-        return queueView(client, indexer);
+        return queueView(client);
       });
       return { ...value, revision };
     } catch (error) {
@@ -494,7 +483,7 @@ export function registerRequests(server: FastifyInstance, pool: Pool, auth: Auth
           await history(client, request.body.requestId, auth.currentUser(request).id,
             'select_next', 'queued', 'queued', null, null, 'Selected as next');
         }
-        return queueView(client, indexer);
+        return queueView(client);
       });
       return { ...value, revision };
     } catch (error) {

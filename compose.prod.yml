@@ -29,14 +29,12 @@ services:
       NODE_ENV: production
       DATABASE_URL: ""
       DB_PASSWORD_FILE: /run/secrets/db_password
-      LIBRARY_ROOT: /mnt/library
+      LEGACY_LIBRARY_ROOT: ${LEGACY_LIBRARY_HOST_PATH:+/mnt/legacy-library}
       IMPORT_STORAGE_ROOT: /var/lib/print-pantry/imports
       MANAGED_LIBRARY_ROOT: /var/lib/print-pantry/managed
       MANAGED_CLIENT_MOUNT_PREFIX: ${MANAGED_CLIENT_MOUNT_PREFIX:-}
-      LIBRARY_IGNORED_DIRS: ${LIBRARY_IGNORED_DIRS:-}
-      LIBRARY_ALLOW_EMPTY: ${LIBRARY_ALLOW_EMPTY:-false}
-      CLIENT_MOUNT_PREFIX: ${CLIENT_MOUNT_PREFIX:-}
-      SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-30}
+      LEGACY_LIBRARY_IGNORED_DIRS: ${LEGACY_LIBRARY_IGNORED_DIRS:-}
+      LEGACY_LIBRARY_ALLOW_EMPTY: ${LEGACY_LIBRARY_ALLOW_EMPTY:-false}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the private HTTPS origin, including scheme and optional port}
       ALLOW_INSECURE_HTTP: ${ALLOW_INSECURE_HTTP:-false}
@@ -44,9 +42,9 @@ services:
     secrets:
       - db_password
     volumes:
-      - ${LIBRARY_HOST_PATH:?Set an absolute, existing library directory}:/mnt/library:ro
+      - ${LEGACY_LIBRARY_HOST_PATH:-./.devcontainer/empty-library}:/mnt/legacy-library:ro
       - pantry_import_data:/var/lib/print-pantry/imports
-      - pantry_managed_library:/var/lib/print-pantry/managed
+      - ${MANAGED_LIBRARY_HOST_PATH:-pantry_managed_library}:/var/lib/print-pantry/managed
     read_only: true
     tmpfs:
       - /tmp

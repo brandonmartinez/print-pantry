@@ -139,15 +139,15 @@ async function updateStatus(client: PoolClient, row: RequestRow, status: ImportS
 async function duplicates(client: PoolClient, row: RequestRow, plan: ImportPlan, excluded?: string) {
   const source = await findImportMatches(client, importSource(row.source_url));
   const hashes = plan.files.filter((f) => f.include).map((f) => f.hash);
-  const content = await client.query<{ project_id: string; name: string; matching_files: number }>(
-    `SELECT p.id AS project_id, p.name, count(DISTINCT a.id)::int AS matching_files
+  const content = await client.query<{ project_id: string; name: string; storage_kind: 'managed' | 'legacy'; matching_files: number }>(
+    `SELECT p.id AS project_id, p.name, p.storage_kind, count(DISTINCT a.id)::int AS matching_files
      FROM assets a JOIN projects p ON p.id = a.project_id
      WHERE a.content_hash = ANY($1::text[]) AND a.missing_at IS NULL AND p.missing_at IS NULL
      GROUP BY p.id, p.name LIMIT 50`, [hashes],
   );
-  const found = new Map(source.projects.map((p) => [p.id, { projectId: p.id, name: p.name, matchingFiles: 0 }]));
+  const found = new Map(source.projects.map((p) => [p.id, { projectId: p.id, name: p.name, matchingFiles: 0, storageKind: p.storageKind }]));
   for (const entry of content.rows) found.set(entry.project_id, {
-    projectId: entry.project_id, name: entry.name, matchingFiles: entry.matching_files,
+    projectId: entry.project_id, name: entry.name, matchingFiles: entry.matching_files, storageKind: entry.storage_kind,
   });
   if (excluded) found.delete(excluded);
   return [...found.values()];
@@ -190,7 +190,7 @@ async function categoryId(client: PoolClient, category: string | null): Promise<
 
 export function registerImportIntake(
   server: FastifyInstance, pool: Pool, auth: ReturnType<typeof createAuth>,
-  legacyRoot: string, storage?: ImportStorage,
+  legacyRoot: string | undefined, storage?: ImportStorage,
 ) {
   server.addContentTypeParser('application/octet-stream', (_request, stream, done) => done(null, stream));
 

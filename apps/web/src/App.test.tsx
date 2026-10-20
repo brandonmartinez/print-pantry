@@ -179,8 +179,7 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
     }
     if (path === '/api/catalog/projects/desk-organizer') return jsonResponse({ project: { ...detail, ...(options.storageKind ? { storageKind: options.storageKind } : {}), ...(options.isBoundary !== undefined ? { isBoundary: options.isBoundary } : {}) } });
     if (path === '/api/catalog/projects/desk-organizer' && method === 'PATCH') return jsonResponse({ project: detail });
-    if (path === '/api/catalog/boundaries' && method === 'PUT') return jsonResponse({ project: detail });
-    if (path === '/api/catalog/rescan' && method === 'POST') return jsonResponse({ scan: { state: 'scanning' } });
+    if (path === '/api/library/legacy-scan') return jsonResponse({ configured: false, scan: { state: 'never', lastError: null, errors: [] } });
     if (path === '/api/requests' && method === 'POST') return jsonResponse({ request: printRequest, revision: 1 });
     if (path === '/api/requests') {
       const request = options.sourceUnavailable ? {
@@ -366,12 +365,9 @@ it('shows a selectable manual fallback when clipboard writing is rejected', asyn
     .toBe('/print-library/Home/Desk Organizer');
 });
 
-it('provides rescan and metadata/boundary editing only to operators', async () => {
+it('provides managed metadata editing but keeps legacy indexing and boundaries out of the normal catalog', async () => {
   const { calls } = await signIn('operator');
-  expect(screen.getByRole('button', { name: '↻ Rescan library' })).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: '↻ Rescan library' }));
-  expect(await screen.findByText('Library rescan started.')).toBeTruthy();
-  await waitFor(() => expect(calls.some(({ path, init }) => path === '/api/catalog/rescan' && init?.method === 'POST')).toBe(true));
+  expect(screen.queryByRole('button', { name: '↻ Rescan library' })).toBeNull();
 
   fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
   fireEvent.click(await screen.findByRole('button', { name: 'Edit metadata' }));
@@ -381,11 +377,7 @@ it('provides rescan and metadata/boundary editing only to operators', async () =
     const patch = calls.find(({ path, init }) => path === '/api/catalog/projects/desk-organizer' && init?.method === 'PATCH');
     expect(JSON.parse(String(patch?.init?.body))).toMatchObject({ designer: 'New Designer', tags: ['organizer', 'desk'] });
   });
-  fireEvent.click(await screen.findByRole('button', { name: 'Set project boundary' }));
-  await waitFor(() => {
-    const boundary = calls.find(({ path, init }) => path === '/api/catalog/boundaries' && init?.method === 'PUT');
-    expect(JSON.parse(String(boundary?.init?.body))).toEqual({ projectId: 'desk-organizer', isBoundary: true });
-  });
+  expect(screen.queryByRole('button', { name: 'Set project boundary' })).toBeNull();
 });
 
 it('does not expose operator actions to household members', async () => {
@@ -407,10 +399,11 @@ it.each([false, true])('hides boundary actions for managed projects with isBound
   expect(calls.some(({ path }) => path === '/api/catalog/boundaries')).toBe(false);
 });
 
-it('preserves explicit legacy project boundary controls', async () => {
+it('does not expose legacy boundary controls even if an outdated detail response reports legacy storage', async () => {
   await signIn('operator', { storageKind: 'legacy', isBoundary: true });
   fireEvent.click(await screen.findByRole('button', { name: 'Open Desk Organizer' }));
-  expect(await screen.findByRole('button', { name: 'Remove boundary override' })).toBeTruthy();
+  await screen.findByRole('heading', { name: 'Desk Organizer' });
+  expect(screen.queryByRole('button', { name: 'Remove boundary override' })).toBeNull();
 });
 
 it('requires explicit file-version selection and submits a bounded print request', async () => {

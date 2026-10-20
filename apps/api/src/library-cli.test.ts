@@ -27,6 +27,22 @@ it('prints help without reading credentials or contacting a server', async () =>
   expect(password).not.toHaveBeenCalled();
   expect(fetcher).not.toHaveBeenCalled();
 });
+it.each(['succeeded', 'partial', 'failed'])('explicitly indexes a legacy migration source and reports %s without copying', async (state) => {
+  const original = transport();
+  const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+    if (String(url).endsWith('/library/legacy-scan')) return new Response(JSON.stringify({ scan: {
+      state: init?.method === 'POST' ? 'running' : state, lastError: state === 'failed' ? 'Migration lock is held' : null,
+    } }));
+    return original(url, init);
+  });
+  const out = vi.fn();
+  expect(await runLibraryCli(['index', ...credentials, '--wait', '--json'], {
+    fetch: fetcher, password: async () => 'Synthetic password', sleep: async () => {}, out,
+  })).toBe(state === 'succeeded' ? 0 : 2);
+  expect(JSON.parse(out.mock.calls[0][0]).scan.state).toBe(state);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST').map(([url]) => String(url)))
+    .toEqual(['http://127.0.0.1:3000/auth/login', 'http://127.0.0.1:3000/library/legacy-scan', 'http://127.0.0.1:3000/auth/logout']);
+});
 it.each([
   ['copy', id], ['activate', id], ['cancel', id], ['restore', id], ['retry', id],
   ['status', 'not-a-uuid'], ['unknown'], ['plan', id],

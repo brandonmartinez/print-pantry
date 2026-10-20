@@ -47,6 +47,7 @@ async function transaction<T>(client: PoolClient, work: () => Promise<T>) {
   catch (error) { await client.query('ROLLBACK'); throw error; }
 }
 async function roots(options: CatalogOptions): Promise<RootIdentities> {
+  if (!options.root) throw new IntakeError('Configure LEGACY_LIBRARY_ROOT to migrate an existing library', 503);
   if (!options.managedRoot) throw new IntakeError('Managed storage is not configured', 503);
   const legacy = resolve(options.root);
   const managed = resolve(options.managedRoot);
@@ -60,10 +61,13 @@ async function roots(options: CatalogOptions): Promise<RootIdentities> {
     }
     return identity(stats);
   }));
+  if (result[0].dev === result[1].dev && result[0].ino === result[1].ino) {
+    throw new IntakeError('Legacy and managed roots must not be mounts of the same directory', 503);
+  }
   return { legacy: result[0], managed: result[1] };
 }
 async function checkedRoots(job: Pick<Job, 'legacy_root' | 'managed_root' | 'root_identities'>, options: CatalogOptions) {
-  if (resolve(options.root) !== job.legacy_root || !options.managedRoot || resolve(options.managedRoot) !== job.managed_root ||
+  if (!options.root || resolve(options.root) !== job.legacy_root || !options.managedRoot || resolve(options.managedRoot) !== job.managed_root ||
     !isDeepStrictEqual(await roots(options), job.root_identities)) {
     throw new IntakeError('Storage configuration or root identity changed. Restore the approved mounts before resuming.', 409);
   }
@@ -239,6 +243,8 @@ export function createLibraryMigrationService(pool: Pool, options: CatalogOption
   return {
     get: async (id: string) => publicJob(pool, await jobRow(pool, id)),
     approve: (planId: string, expectedFingerprint: string, actorId: string) => operation(async (client) => {
+      const legacyRoot = options.root;
+      if (!legacyRoot) throw new IntakeError('Configure LEGACY_LIBRARY_ROOT to migrate an existing library', 503);
       const previous = await libraryMigrationForPlan(client, planId);
       if (previous) return previous;
       const plan = (await client.query<{ snapshot: LibraryReorganizationPlan }>('SELECT snapshot FROM library_reorganization_plans WHERE id=$1', [planId])).rows[0]?.snapshot;
@@ -274,13 +280,13 @@ export function createLibraryMigrationService(pool: Pool, options: CatalogOption
       const id = randomUUID();
       await transaction(client, async () => {
         await client.query(`INSERT INTO library_migrations (id,plan_id,created_by,legacy_root,managed_root,root_identities,history)
-          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [id, plan.id, actorId, resolve(options.root), resolve(options.managedRoot!),
+          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [id, plan.id, actorId, resolve(legacyRoot), resolve(options.managedRoot!),
           JSON.stringify(rootIdentities), JSON.stringify([{ actorId, action: 'approved', at: new Date().toISOString() }])]);
         for (const [index, row] of current.rows.entries()) {
           const project = plan.projects.find((entry) => entry.id === row.id)!;
           const snapshot: Snapshot = { project, files: current.files[index], fingerprint: digest([row, current.files[index]]) };
           await client.query(`INSERT INTO library_migration_projects (migration_id,project_id,legacy_root,legacy_path,managed_path,snapshot)
-            VALUES ($1,$2,$3,$4,$5,$6)`, [id, row.id, resolve(options.root), project.relativePath, project.destinationPath, JSON.stringify(snapshot)]);
+            VALUES ($1,$2,$3,$4,$5,$6)`, [id, row.id, resolve(legacyRoot), project.relativePath, project.destinationPath, JSON.stringify(snapshot)]);
         }
       });
       return publicJob(client, await jobRow(client, id));

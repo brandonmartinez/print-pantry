@@ -19,6 +19,11 @@ async function root() {
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
 describe('bounded original intake and deterministic organization', () => {
+  it('supports managed imports without a legacy root while still rejecting overlapping writable roots', async () => {
+    const directory = await root();
+    await expect(validateStorage({ intakeRoot: join(directory, 'intake'), managedRoot: join(directory, 'managed') })).resolves.toBeUndefined();
+    await expect(validateStorage({ intakeRoot: directory, managedRoot: join(directory, 'nested') })).rejects.toThrow('separate, non-nested');
+  });
   it('preserves a ZIP download name containing nonportable characters without using it as a storage path', async () => {
     const storage = await root();
     const name = 'Universal Drill Bit Holder | Fits Kobalt, & More.zip';

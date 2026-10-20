@@ -11,6 +11,7 @@ Build first: npm run build
 npm run library -- <command> [run-id] --username <operator> --password-stdin [options]
 
 Commands:
+  index                Explicitly index a configured legacy source for migration
   plan                 Freeze and inspect all indexed legacy projects (no copying)
   list                 List recent runs
   status <run-id>      Read progress, fingerprint, roots and counts
@@ -21,7 +22,7 @@ Commands:
   resume <run-id>      Continue the previously paused operation
   retry <run-id>       Retry failed work in --stage copy|activate|restore|cancel
   cancel <run-id>      Cancel unactivated work; retain copies
-  restore <run-id>     Restore activated projects; retain managed copies
+  restore <run-id>     Restore to legacy storage; hides projects from live library
   wait <run-id>        Wait for the current stage, not for future approval
 
 Options:
@@ -89,9 +90,9 @@ export async function runLibraryCli(args: string[], overrides: Partial<IO> = {})
     } });
     if (values.help || !positionals.length) { io.out(help); return 0; }
     const [command, id] = positionals;
-    const commands = ['plan', 'list', 'status', 'items', 'copy', 'activate', 'pause', 'resume', 'retry', 'cancel', 'restore', 'wait'];
+    const commands = ['index', 'plan', 'list', 'status', 'items', 'copy', 'activate', 'pause', 'resume', 'retry', 'cancel', 'restore', 'wait'];
     if (!commands.includes(command) || positionals.length > 2) throw new Error('Unknown command or extra arguments; use --help.');
-    if (['plan', 'list'].includes(command) ? Boolean(id) : !id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new Error('Supply a UUID run ID for this command; plan/list do not take an ID.');
+    if (['index', 'plan', 'list'].includes(command) ? Boolean(id) : !id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new Error('Supply a UUID run ID for this command; index/plan/list do not take an ID.');
     if (!values.username || !values['password-stdin']) throw new Error('An operator --username and --password-stdin are required.');
     const base = new URL(values.url ?? 'http://127.0.0.1:3000');
     if (base.username || base.password || base.search || base.hash) throw new Error('API URLs must not contain credentials, query parameters, or fragments.');
@@ -136,7 +137,15 @@ export async function runLibraryCli(args: string[], overrides: Partial<IO> = {})
       }
       return run;
     }
-    if (command === 'list') {
+    if (command === 'index') {
+      type Status = { scan: { state: string; lastError?: string | null } };
+      let result = await request<Status>('/library/legacy-scan', { method: 'POST' });
+      if (values.wait) {
+        while (result.scan.state === 'running') { await io.sleep(); result = await request<Status>('/library/legacy-scan'); }
+        if (result.scan.state !== 'succeeded') exit = 2;
+      }
+      io.out(values.json ? JSON.stringify(result) : `Legacy migration indexing: ${result.scan.state}${result.scan.lastError ? `\n${result.scan.lastError}` : ''}`);
+    } else if (command === 'list') {
       const result = await request<{ runs: LibraryAdoptionRun[] }>('/library/adoptions');
       io.out(values.json ? JSON.stringify(result) : result.runs.map(describe).join('\n\n') || 'No adoption runs.');
     } else if (command === 'items') {

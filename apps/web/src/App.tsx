@@ -6,11 +6,6 @@ import { SourceDiscovery } from './SourceDiscovery.js';
 import { LibraryManagement } from './LibraryManagement.js';
 
 type User = { id: string; username: string; role: 'operator' | 'member' | string };
-type Scan = {
-  state: string;
-  lastSuccessfulAt?: string | null;
-  lastError?: string | null;
-};
 type RequestStatus = 'requested' | 'queued' | 'printing' | 'completed' | 'declined' | 'canceled' | string;
 type RequestSelection = {
   assetId: string;
@@ -94,10 +89,8 @@ type CatalogResponse = {
   pageSize: number;
   categories: string[];
   fileTypes: string[];
-  scan: Scan;
 };
 type ProjectResponse = { project: Project & { files: ProjectFile[] } };
-type ScanResponse = { scan: Scan };
 
 const pageSize = 12;
 const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -190,7 +183,7 @@ function unavailableSourceMessage(reason?: string | null): string {
     asset_missing: 'The selected source file is no longer available.',
     version_missing: 'The selected file version is no longer available.',
     version_not_current: 'The selected file version is no longer current or available.',
-    library_offline: 'Library storage is offline; the source cannot be checked right now.',
+    migration_required: 'This project is not active in the managed library. Ask an operator to migrate and activate it.',
   };
   return messages[reason ?? ''] ?? 'One or more requested source files are no longer available.';
 }
@@ -338,26 +331,6 @@ function LoginForm({
       </section>
       <footer className="login-footer">Made for keeping good projects close.</footer>
     </main>
-  );
-}
-
-function ScanBadge({ scan }: { scan?: Scan }) {
-  if (!scan) return <span className="scan-badge scan-unknown">Scan status unavailable</span>;
-  const state = scan.state.toLowerCase();
-  const className = state.includes('error') || state.includes('fail') || state.includes('offline')
-    ? 'scan-error'
-    : state.includes('scan') || state.includes('running')
-      ? 'scan-running'
-      : 'scan-ready';
-  const date = formatDate(scan.lastSuccessfulAt);
-  const label = state === 'idle' || state === 'ready' || state === 'complete' || state === 'succeeded'
-    ? `Library ${date ? `checked ${date}` : 'ready'}`
-    : scan.state;
-  return (
-    <span className={`scan-badge ${className}`} title={scan.lastError || undefined}>
-      <span className="scan-dot" aria-hidden="true" />
-      {label}
-    </span>
   );
 }
 
@@ -897,12 +870,10 @@ function RequestsPage({ user }: { user: User }) {
 function ProjectDetail({
   projectId,
   user,
-  scan,
   onBack,
 }: {
   projectId: string;
   user: User;
-  scan?: Scan;
   onBack: () => void;
 }) {
   const [project, setProject] = useState<ProjectResponse['project'] | null>(null);
@@ -953,25 +924,6 @@ function ProjectDetail({
     }
   }
 
-  async function toggleBoundary() {
-    if (!project || project.storageKind === 'managed') return;
-    setActionBusy(true);
-    setActionError('');
-    setActionMessage('');
-    try {
-      await apiRequest('/api/catalog/boundaries', {
-        method: 'PUT',
-        body: JSON.stringify({ projectId: project.id, isBoundary: !project.isBoundary }),
-      });
-      await loadProject();
-      setActionMessage(project.isBoundary ? 'Project boundary override removed.' : 'Project marked as a boundary.');
-    } catch (reason) {
-      setActionError(errorMessage(reason));
-    } finally {
-      setActionBusy(false);
-    }
-  }
-
   if (loading) {
     return <section className="detail-state" aria-live="polite"><span className="spinner" />Loading project…</section>;
   }
@@ -1005,9 +957,6 @@ function ProjectDetail({
             <button className="button button-quiet" disabled={actionBusy} onClick={() => setEditing((value) => !value)} type="button">
               {editing ? 'Close editor' : 'Edit metadata'}
             </button>
-            {project.storageKind !== 'managed' && <button className="button button-quiet" disabled={actionBusy} onClick={() => void toggleBoundary()} type="button">
-              {project.isBoundary ? 'Remove boundary override' : 'Set project boundary'}
-            </button>}
           </div>
         )}
       </div>
@@ -1070,12 +1019,7 @@ function ProjectDetail({
               {project.notes && <div><dt>Notes</dt><dd className="notes-text">{project.notes}</dd></div>}
             </dl>
             <LocalPathControl label="project" path={project.clientPath} />
-            {project.available && files.length === 0 && <p className="quiet small-note">Files may not be available yet. Check the library scan status.</p>}
-          </section>
-          <section className="info-card scan-card">
-            <h2>Library status</h2>
-            <ScanBadge scan={scan} />
-            {scan?.lastError && <p className="scan-error-copy">{scan.lastError}</p>}
+            {project.available && files.length === 0 && <p className="quiet small-note">No managed files are available. Ask an operator to inspect the import or migration.</p>}
           </section>
           {project.tags && project.tags.length > 0 && (
             <section className="info-card">
@@ -1105,14 +1049,10 @@ function RoutedApp() {
   const [category, setCategory] = useState('');
   const [fileType, setFileType] = useState('');
   const [page, setPage] = useState(1);
+  const [catalogRefresh, setCatalogRefresh] = useState(0);
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState('');
-  const [scan, setScan] = useState<Scan>();
-  const [rescanBusy, setRescanBusy] = useState(false);
-  const [rescanError, setRescanError] = useState('');
-  const [rescanMessage, setRescanMessage] = useState('');
-  const [catalogRefresh, setCatalogRefresh] = useState(0);
   const catalogEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1161,7 +1101,6 @@ function RoutedApp() {
             items: [...current.items, ...result.items.filter((project) => !existingIds.has(project.id))],
           };
         });
-        setScan(result.scan);
         setConnectionError('');
       })
       .catch((reason: unknown) => {
@@ -1226,23 +1165,6 @@ function RoutedApp() {
     }
   }
 
-  async function rescan() {
-    setRescanBusy(true);
-    setRescanError('');
-    setRescanMessage('');
-    try {
-      const result = await apiRequest<ScanResponse>('/api/catalog/rescan', { method: 'POST' });
-      setScan(result.scan);
-      setRescanMessage('Library rescan started.');
-      setPage(1);
-      setCatalogRefresh((value) => value + 1);
-    } catch (reason) {
-      setRescanError(errorMessage(reason));
-    } finally {
-      setRescanBusy(false);
-    }
-  }
-
   if (authLoading) {
     return <main className="loading-shell" aria-live="polite"><span className="spinner" />Checking household session…</main>;
   }
@@ -1291,7 +1213,6 @@ function RoutedApp() {
           <ProjectDetail
             projectId={selectedProjectId}
             user={user}
-            scan={scan}
             onBack={() => navigate('/')}
           />
         </main>
@@ -1318,19 +1239,8 @@ function RoutedApp() {
               </div>
               <div className="catalog-actions">
                 <Link className="button button-primary" to="/imports#add">Add New Print</Link>
-                <ScanBadge scan={scan} />
-                {user.role === 'operator' && (
-                  <button className="button button-outline" disabled={rescanBusy} onClick={() => void rescan()} type="button">
-                    {rescanBusy ? 'Scanning…' : '↻ Rescan library'}
-                  </button>
-                )}
               </div>
             </div>
-            {(rescanError || rescanMessage) && (
-              <p className={`notice ${rescanError ? 'notice-error' : 'notice-success'}`} role={rescanError ? 'alert' : 'status'}>
-                {rescanError || rescanMessage}
-              </p>
-            )}
 
             <form className="filter-bar" onSubmit={(event) => { event.preventDefault(); setPage(1); setSearchTerm(searchText.trim()); }}>
               <label className="search-field">

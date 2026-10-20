@@ -29,7 +29,11 @@ let assetId: string;
 let versionId: string;
 
 async function scanLibrary() {
+  await pool.query("UPDATE projects SET storage_kind='legacy' WHERE relative_path LIKE $1", [`${rootName}/%`]);
+  await pool.query("UPDATE assets SET storage_kind='legacy' WHERE project_id IN (SELECT id FROM projects WHERE relative_path LIKE $1)", [`${rootName}/%`]);
   const result = await indexer.rescan();
+  await pool.query("UPDATE projects SET storage_kind='managed' WHERE relative_path LIKE $1", [`${rootName}/%`]);
+  await pool.query("UPDATE assets SET storage_kind='managed' WHERE project_id IN (SELECT id FROM projects WHERE relative_path LIKE $1)", [`${rootName}/%`]);
   scanIds.push(result.id);
   return result;
 }
@@ -68,7 +72,7 @@ beforeAll(async () => {
   );
   server = buildServer(pool, {
     pool, root, indexer, read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: false,
-    clientMountPrefix: '/Volumes/Synthetic Library',
+    managedRoot: root, managedClientMountPrefix: '/Volumes/Synthetic Library',
   });
   operatorCookie = await login(username);
   requesterCookie = await login(requesterName);
@@ -115,10 +119,10 @@ afterAll(async () => {
 describe('authenticated catalog and local files', () => {
   it('denies unauthenticated reads and requester-only operator actions', async () => {
     expect((await server.inject('/catalog/projects')).statusCode).toBe(401);
-    expect((await server.inject('/catalog/status')).statusCode).toBe(401);
-    expect((await server.inject({ method: 'POST', url: '/catalog/rescan' })).statusCode).toBe(401);
+    expect((await server.inject('/library/legacy-scan')).statusCode).toBe(401);
+    expect((await server.inject({ method: 'POST', url: '/library/legacy-scan' })).statusCode).toBe(401);
     expect((await server.inject({
-      method: 'POST', url: '/catalog/rescan', headers: { cookie: requesterCookie },
+      method: 'POST', url: '/library/legacy-scan', headers: { cookie: requesterCookie },
     })).statusCode).toBe(403);
   });
 
@@ -211,7 +215,7 @@ describe('authenticated catalog and local files', () => {
       payload: { description: 'Authored text' },
     })).statusCode).toBe(403);
     expect((await server.inject({
-      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: requesterCookie },
+      method: 'PUT', url: '/library/legacy-boundaries', headers: { cookie: requesterCookie },
       payload: { projectId, isBoundary: true },
     })).statusCode).toBe(403);
     expect((await server.inject({
@@ -235,16 +239,18 @@ describe('authenticated catalog and local files', () => {
     const part = detail.json().project.files.find((file: { name: string }) => file.name === 'part 02.stl');
     expect(part.id).toBe(assetId);
     expect(part.versionId).toBe(versionId);
+    await pool.query("UPDATE projects SET storage_kind='legacy' WHERE id=$1", [projectId]);
     expect((await server.inject({
-      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      method: 'PUT', url: '/library/legacy-boundaries', headers: { cookie: operatorCookie },
       payload: { projectId, isBoundary: true },
     })).statusCode).toBe(200);
-    expect((await server.inject({ method: 'GET', url, headers: { cookie: operatorCookie } }))
-      .json().project.isBoundary).toBe(true);
+    expect((await server.inject({ method: 'GET', url, headers: { cookie: operatorCookie } })).statusCode).toBe(404);
+    expect((await pool.query('SELECT * FROM project_boundary_overrides WHERE relative_path=(SELECT relative_path FROM projects WHERE id=$1)', [projectId])).rowCount).toBe(1);
     expect((await server.inject({
-      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      method: 'PUT', url: '/library/legacy-boundaries', headers: { cookie: operatorCookie },
       payload: { projectId, isBoundary: false },
     })).statusCode).toBe(200);
+    await pool.query("UPDATE projects SET storage_kind='managed' WHERE id=$1", [projectId]);
     expect((await server.inject({ method: 'GET', url, headers: { cookie: operatorCookie } }))
       .json().project.isBoundary).toBe(false);
   });
@@ -291,7 +297,7 @@ describe('authenticated catalog and local files', () => {
 
   it('serves managed files and client paths only from managed storage and rejects managed boundary changes', async () => {
     const managedRoot = path.join(outside, 'managed');
-    const projectPath = `${rootName}/Gadgets/Desk Lamp`;
+    const projectPath = `${rootName}/Gadgets/Explicit Managed`;
     const projectRelativePath = 'models/docs/exports/images/Blue/managed.stl';
     const relativePath = `${projectPath}/${projectRelativePath}`;
     const contents = 'solid managed\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 7 0 0\nvertex 0 7 0\nendloop\nendfacet\nendsolid managed';
@@ -319,11 +325,12 @@ describe('authenticated catalog and local files', () => {
     await pool.query('UPDATE assets SET current_version_id = $2 WHERE id = $1', [managedAsset, managedVersion]);
     const managedServer = buildServer(pool, {
       pool, root, managedRoot, indexer, secureCookie: false,
-      clientMountPrefix: '/legacy', managedClientMountPrefix: '/managed',
+      managedClientMountPrefix: '/managed',
     });
     const noPrefixServer = buildServer(pool, {
-      pool, root, managedRoot, indexer, secureCookie: false, clientMountPrefix: '/legacy',
+      pool, root, managedRoot, indexer, secureCookie: false,
     });
+    const noStorageServer = buildServer(pool, { pool, root, indexer, secureCookie: false });
     const headers = { cookie: operatorCookie };
     try {
       const detail = (await managedServer.inject({ url: `/catalog/projects/${managedProject}`, headers })).json().project;
@@ -347,21 +354,21 @@ describe('authenticated catalog and local files', () => {
       expect(geometry.statusCode).toBe(200);
       expect(geometry.json().triangles).toEqual([[[0, 0, 0], [7, 0, 0], [0, 7, 0]]]);
       for (const isBoundary of [true, false]) {
-        expect((await managedServer.inject({ method: 'PUT', url: '/catalog/boundaries', headers,
-          payload: { projectId: managedProject, isBoundary } })).statusCode).toBe(400);
+        expect((await managedServer.inject({ method: 'PUT', url: '/library/legacy-boundaries', headers,
+          payload: { projectId: managedProject, isBoundary } })).statusCode).toBe(404);
       }
       expect((await pool.query('SELECT * FROM project_boundary_overrides WHERE relative_path = $1', [projectPath])).rows)
         .toHaveLength(0);
-      expect((await managedServer.inject({ method: 'PUT', url: '/catalog/boundaries', headers,
+      expect((await managedServer.inject({ method: 'PUT', url: '/library/legacy-boundaries', headers,
         payload: { relativePath: projectPath, kind: 'project' } })).statusCode).toBe(200);
       expect((await managedServer.inject({ url: `/catalog/projects/${managedProject}`, headers })).json().project.isBoundary)
         .toBe(false);
       expect((await managedServer.inject({ url: `/catalog/projects/${projectId}`, headers })).json().project.isBoundary)
-        .toBe(true);
-      expect((await managedServer.inject({ method: 'DELETE', url: '/catalog/boundaries', headers,
+        .toBe(false);
+      expect((await managedServer.inject({ method: 'DELETE', url: '/library/legacy-boundaries', headers,
         payload: { relativePath: projectPath } })).statusCode).toBe(204);
       for (const route of ['download', 'preview', 'geometry']) {
-        expect((await server.inject({ url: `/catalog/assets/${managedAsset}/${route}`, headers })).statusCode).toBe(503);
+        expect((await noStorageServer.inject({ url: `/catalog/assets/${managedAsset}/${route}`, headers })).statusCode).toBe(503);
       }
       await rename(managedRoot, `${managedRoot}-offline`);
       for (const route of ['download', 'preview', 'geometry']) {
@@ -370,6 +377,7 @@ describe('authenticated catalog and local files', () => {
     } finally {
       await managedServer.close();
       await noPrefixServer.close();
+      await noStorageServer.close();
     }
   });
 
@@ -401,19 +409,19 @@ describe('authenticated catalog and local files', () => {
     expect(invalid.statusCode).toBe(401);
     const boundary = `${rootName}/Gadgets`;
     expect((await server.inject({
-      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: requesterCookie },
+      method: 'PUT', url: '/library/legacy-boundaries', headers: { cookie: requesterCookie },
       payload: { relativePath: boundary, kind: 'collection' },
     })).statusCode).toBe(403);
     expect((await server.inject({
-      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      method: 'PUT', url: '/library/legacy-boundaries', headers: { cookie: operatorCookie },
       payload: { relativePath: '../outside', kind: 'project' },
     })).statusCode).toBe(422);
     expect((await server.inject({
-      method: 'PUT', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      method: 'PUT', url: '/library/legacy-boundaries', headers: { cookie: operatorCookie },
       payload: { relativePath: boundary, kind: 'collection' },
     })).statusCode).toBe(200);
     expect((await server.inject({
-      method: 'DELETE', url: '/catalog/boundaries', headers: { cookie: operatorCookie },
+      method: 'DELETE', url: '/library/legacy-boundaries', headers: { cookie: operatorCookie },
       payload: { relativePath: boundary },
     })).statusCode).toBe(204);
     const logout = await server.inject({

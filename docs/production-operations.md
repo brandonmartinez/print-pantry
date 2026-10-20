@@ -18,7 +18,7 @@ substitute development commands into a NAS. The deployment provides:
 - an explicitly selected external-database override or profile when
   `DATABASE_URL` is intentionally supplied, never an accidental connection to
   a host-local database;
-- a read-only library mount at `LIBRARY_ROOT`, persistent database storage,
+- an optional read-only migration-source mount at `LEGACY_LIBRARY_ROOT`, persistent database storage,
   internal-only database networking, and application readiness checks;
 - separate writable `pantry_import_data` and `pantry_managed_library` volumes
   for retained intake originals and published projects; never make the legacy
@@ -36,9 +36,13 @@ must likewise be secret-mounted only for the dependency-install layer.
 ## Initial deployment
 
 Copy `deploy/production.env.example` into an ignored `.env`, fill its
-placeholders, and restrict access to the file. Set `LIBRARY_HOST_PATH` to an
-existing absolute host directory: Compose mounts it read-only at
-`LIBRARY_ROOT=/mnt/library` in the container. `CLIENT_MOUNT_PREFIX`, when
+placeholders, and restrict access to the file. The live library is managed
+storage: set `MANAGED_LIBRARY_HOST_PATH` to an existing, application-writable
+absolute host/NAS directory, or leave it blank to use the persistent managed
+Docker volume. Set `LEGACY_LIBRARY_HOST_PATH` only when migrating an old library;
+Compose mounts that optional source read-only at
+`LEGACY_LIBRARY_ROOT=/mnt/legacy-library`. It is not served by the normal catalog.
+`MANAGED_CLIENT_MOUNT_PREFIX`, when
 set, is the separate client-visible path; do not expose a container-only path
 to browser operators. For internal PostgreSQL, create an external password
 file containing a unique 24+ character URI-safe password (for example,
@@ -55,7 +59,9 @@ Compose also reads that file from the repository root:
 set -a
 . ./.env
 set +a
-test -d "$LIBRARY_HOST_PATH" && test -s "$HOST_NPM_CONFIG_FILE"
+test -z "${LEGACY_LIBRARY_HOST_PATH:-}" || test -d "$LEGACY_LIBRARY_HOST_PATH"
+test -z "${MANAGED_LIBRARY_HOST_PATH:-}" || test -d "$MANAGED_LIBRARY_HOST_PATH"
+test -s "$HOST_NPM_CONFIG_FILE"
 test -n "${DATABASE_URL:-}" || test -s "$DB_PASSWORD_FILE"
 docker compose -p <composeproject> -f compose.prod.yml config --quiet
 ```
@@ -159,7 +165,7 @@ entrypoint automatically.
 
 Finally, sign in through the private HTTPS origin, confirm API readiness, and
 perform an operator rescan. A healthy empty library is only authoritative when
-`LIBRARY_ALLOW_EMPTY=true` is intentionally set. Otherwise an empty,
+`LEGACY_LIBRARY_ALLOW_EMPTY=true` is intentionally set. Otherwise an empty,
 unavailable, or partial mount must not mark an existing catalog as missing.
 
 ## Routine operations and upgrades
@@ -177,9 +183,11 @@ Never point a migration or test command at an unrelated external schema.
 If the dedicated-database guard rejects the target, correct the URL or
 provision an empty application-only database; do not bypass it.
 
-Rescans are read-only. Operators may trigger them from the catalog UI/API, and
-the scheduler uses `SCAN_INTERVAL_MINUTES`. Configure ignored directories only
-by directory name with `LIBRARY_IGNORED_DIRS`; do not use path fragments or
+Legacy indexing is read-only and migration-only. Operators trigger it explicitly
+from **Manage library**, `library index`, or `/api/library/legacy-scan`; there
+is no startup scan or scheduler. Managed catalog records come from publication
+and adoption, not legacy scans. Configure ignored directories only
+by directory name with `LEGACY_LIBRARY_IGNORED_DIRS`; do not use path fragments or
 assume underscore-prefixed collections are disposable. Investigate a failed,
 partial, or offline scan before retrying. Do not repair it by deleting catalog
 rows or moving library files.
@@ -273,9 +281,14 @@ Per-project library adoption uses separately approved copy/verify/activate
 requests with durable database journals. Bulk initialization uses the same
 services through a persistent API-side runner and requires separate batch copy
 and activation approvals. The CLI authenticates against that API; it does not
-run an independent filesystem migration. Keep `LIBRARY_ROOT` read-only and retain
+run an independent filesystem migration. Keep `LEGACY_LIBRARY_ROOT` read-only and retain
 its original files: neither activation nor restoration requires source write
 access. Scans and publication share an exclusive database lock with migration.
+Only activation exposes a legacy project in the live catalog. Restoration
+hides it again and marks retained print-request files `migration_required`;
+there is no fallback to legacy downloads. Legacy storage can be omitted from
+a managed-only installation, but must be restored at the approved identity
+before resuming or restoring old migrations.
 After a timeout/restart, reopen the saved plan and refresh progress before
 retrying; an operation may have completed after the browser stopped waiting.
 The roots and their filesystem identities must match the approved mounts.
@@ -300,8 +313,8 @@ restore that cannot demonstrate that isolation.
 | Image build cannot download packages | Verify the required host npm configuration secret and optional CA secret are mounted for the build. Do not change to a public registry. |
 | API is not ready | Check the application and database logs, connectivity, migration result, and required `DATABASE_URL`; do not reset a production volume. |
 | Login fails only behind HTTPS | Verify the proxy forwards the correct scheme/host and that `COOKIE_SECURE=true` is set only for HTTPS. Do not weaken cookie or origin protections. |
-| Library appears empty or files become unavailable | Verify the read-only mount and scan status first. Keep `LIBRARY_ALLOW_EMPTY=false` unless an intentionally empty healthy library is being cataloged. |
-| Client copy-path is unusable | Correct `CLIENT_MOUNT_PREFIX` to the operator's mounted path; it must not be a container path. |
+| Library appears empty or files become unavailable | Verify the read-only mount and scan status first. Keep `LEGACY_LIBRARY_ALLOW_EMPTY=false` unless an intentionally empty healthy library is being cataloged. |
+| Client copy-path is unusable | Correct `MANAGED_CLIENT_MOUNT_PREFIX` to the operator's mounted path; it must not be a container path. |
 | Upgrade fails during migration | Keep the old deployment stopped or isolated as appropriate, restore only to a verified target if needed, and investigate the migration error before retrying. |
 
 ## Retiring the generated catalog

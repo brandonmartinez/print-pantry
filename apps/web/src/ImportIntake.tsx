@@ -225,7 +225,9 @@ export function ImportIntake({ item, onChanged }: { item: ImportRequest; onChang
           {plan.warnings.length > 0 && <div className="notice"><strong>Plan warnings</strong><ul>{plan.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div>}
           {plan.duplicates.length > 0 && <div className="notice">
             <strong>Possible library duplicates</strong>
-            <ul>{plan.duplicates.map((duplicate) => <li key={duplicate.projectId}><Link to={`/projects/${encodeURIComponent(duplicate.projectId)}`}>{duplicate.name}</Link> · {duplicate.matchingFiles} matching files</li>)}</ul>
+            <ul>{plan.duplicates.map((duplicate) => <li key={duplicate.projectId}>{duplicate.storageKind === 'managed' ?
+              <Link to={`/projects/${encodeURIComponent(duplicate.projectId)}`}>{duplicate.name}</Link> : duplicate.name}
+              {duplicate.storageKind === 'legacy' && ' · legacy, migration required'} · {duplicate.matchingFiles} matching files</li>)}</ul>
             {!locked && <label className="import-existing"><input type="checkbox" checked={confirmed} disabled={busy || dirty} onChange={(event) => setConfirmed(event.target.checked)} />I reviewed the duplicates and confirm publishing another project.</label>}
           </div>}
           {!locked && <button className="button button-primary" type="button" disabled={!canEdit || dirty || pending.length > 0 || (plan.duplicates.length > 0 && !confirmed)} onClick={() => void run(() => mutate('publish', { confirmDuplicates: confirmed }))}>Publish to managed library</button>}

@@ -1,11 +1,37 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { LibraryManagementResponse, LibraryMigrationJob, LibraryMigrationProjectStatus, LibraryPlanIssue, LibraryReorganizationPlan, LibraryReorganizationProject } from '@print-pantry/contracts';
+import type { LibraryManagementProject, LibraryManagementResponse, LibraryMigrationJob, LibraryMigrationProjectStatus, LibraryPlanIssue, LibraryReorganizationPlan, LibraryReorganizationProject } from '@print-pantry/contracts';
 import { LibraryAdoption } from './LibraryAdoption.js';
 import { LibraryFileSize as FileSize, libraryByteLabel as byteLabel } from './LibraryFileSize.js';
+import { LegacyLibraryScan } from './LegacyLibraryScan.js';
+import { SourceDiscovery } from './SourceDiscovery.js';
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 const errorMessage = (reason: unknown) => reason instanceof Error ? reason.message : 'Library management failed; retry shortly.';
+
+function LegacyProjectTools({ project, request, refresh }: { project: LibraryManagementProject; request: Request; refresh: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  async function boundary() {
+    setBusy(true); setError(''); setMessage('');
+    try {
+      await request('/api/library/legacy-boundaries', { method: 'PUT',
+        body: JSON.stringify({ projectId: project.id, isBoundary: !project.isBoundary }) });
+      setMessage('Boundary saved. Index the legacy library again before creating a migration plan.');
+      refresh();
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
+  }
+  return <div><button className="button button-quiet" type="button" onClick={() => setOpen((value) => !value)}>
+    {open ? 'Hide migration tools' : 'Show migration tools'}</button>
+    {open && <><SourceDiscovery projectId={project.id} request={request} />
+      <button className="button button-outline" type="button" disabled={busy} onClick={() => void boundary()}>
+        {project.isBoundary ? 'Remove boundary override' : 'Set project boundary'}</button>
+      {message && <p role="status">{message}</p>}
+      {error && <p className="notice notice-error" role="alert">{error}</p>}</>}</div>;
+}
 
 function Issues({ items }: { items: LibraryPlanIssue[] }) {
   return <div className="library-issue-groups">{(['blocker', 'warning'] as const).map((severity) => {
@@ -21,8 +47,8 @@ function Issues({ items }: { items: LibraryPlanIssue[] }) {
 }
 
 const migrationStatuses: Record<LibraryMigrationProjectStatus, string> = {
-  pending: 'Awaiting copy', copying: 'Copy interrupted or in progress', copied: 'Copy verified; legacy still active',
-  activated: 'Managed copy active', restored: 'Legacy restored; managed copy retained', canceled: 'Canceled; legacy still active',
+  pending: 'Awaiting copy', copying: 'Copy interrupted or in progress', copied: 'Copy verified; awaiting activation',
+  activated: 'Managed copy active', restored: 'Legacy restored; hidden from live library', canceled: 'Canceled; source retained',
 };
 
 function MigrationControls({ plan, request, onJob, onBusy }: {
@@ -94,7 +120,7 @@ function MigrationControls({ plan, request, onJob, onBusy }: {
         </div>
         {(['activate', 'restore'] as const).map((action) => confirmation === `${action}:${project.projectId}` && <div key={action} className="notice">
           <p>{action === 'activate' ? 'Switch downloads and requests to the verified managed copy? The original folder stays in legacy storage.' :
-            'Switch back to the retained original folder? Both copies must still verify. Later display metadata is preserved and the managed copy is retained.'}</p>
+            'Restore to migration-only legacy storage? The project disappears from the live library and its print files become unavailable. Both copies must still verify. Display metadata and the managed copy are retained.'}</p>
           <div className="library-management-actions"><button type="button" className="button button-primary" disabled={Boolean(pending)}
             onClick={() => void perform(action, project.projectId)}>{action === 'activate' ? 'Confirm activation' : 'Confirm restoration'}</button>
             <button type="button" className="button button-quiet" disabled={Boolean(pending)} onClick={() => setConfirmation('')}>Back</button></div>
@@ -121,14 +147,14 @@ function ProjectPreview({ project, blockedByPlan }: { project: LibraryReorganiza
   const status = blocked ? 'Blocked' : project.inspectionComplete ? 'Inspection complete' : 'Inspection incomplete';
   return <article className="library-plan-project" aria-label={`${project.name} preview`}>
     <header className="library-plan-project-heading">
-      <h3><Link to={`/projects/${project.id}`}>{project.name}</Link></h3>
+      <h3>{project.name}</h3>
       <span className={`library-preview-status ${blocked ? 'is-blocked' : project.inspectionComplete ? 'is-complete' : 'is-incomplete'}`}>{status}</span>
     </header>
     <dl className="library-preview-facts">
       <div><dt>Files checked</dt><dd>{project.checkedFiles} of {project.fileCount}</dd></div>
       <div><dt>Category</dt><dd>{project.category ?? 'Uncategorized'}</dd></div>
       <div><dt>Approved sources</dt><dd>{project.sourceCount ? project.sourceCount : 'None'}
-        {!project.sourceCount && <> · <Link to={`/projects/${project.id}`}>Review sources</Link></>}</dd></div>
+        {!project.sourceCount && ' · Review sources using the inventory migration tools.'}</dd></div>
     </dl>
     <dl className="library-folder-comparison">
       <div><dt>Current folder <span>Legacy storage</span></dt><dd><code>{project.relativePath}</code></dd></div>
@@ -240,6 +266,7 @@ export function LibraryManagement({ request }: { request: Request }) {
       <button className="button button-outline" type="button" disabled={busy || loading || planLoading} onClick={() => setRefresh((value) => value + 1)}>Refresh</button>
     </section>
     <p className="notice">Generating a dry run saves a database snapshot only. No files are copied, renamed, deleted, or activated by a preview. Migration requires separate approval, copying, verification, and activation.</p>
+    <LegacyLibraryScan request={request} refresh={refresh} onIndexed={refreshInventory} />
     <LibraryAdoption request={request} legacyCount={data?.summary.legacy} refresh={refresh} onStorageChanged={refreshInventory} />
     {error && <p className="notice notice-error" role="alert">{error}</p>}
     {loading && <p role="status">Loading library inventory...</p>}
@@ -268,7 +295,8 @@ export function LibraryManagement({ request }: { request: Request }) {
           <p className="small-note">{project.storageKind} · {project.fileCount} files · <FileSize value={project.sizeBytes} />
             {project.category && ` · ${project.category}`}{!project.available && ' · Marked missing'}</p>
           <code className="library-storage-path">{project.relativePath}</code>
-          <Link to={`/projects/${project.id}`}>Open project / manage sources</Link>
+          {project.storageKind === 'managed' ? <Link to={`/projects/${project.id}`}>Open project / manage sources</Link> :
+            <LegacyProjectTools project={project} request={request} refresh={refreshInventory} />}
         </li>)}</ul>
         {!data.items.length && <p>No projects match this search.</p>}
         <div className="library-management-actions" aria-label="Management pagination">

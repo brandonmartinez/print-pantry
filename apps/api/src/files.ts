@@ -22,7 +22,7 @@ export class LibraryUnavailableError extends Error {
 export function clientPath(prefix: string | undefined, relativePath: string): string | null {
   if (!prefix) return null;
   if (!path.posix.isAbsolute(prefix) || prefix.includes('\0') || prefix.includes('\\')) {
-    throw new Error('CLIENT_MOUNT_PREFIX must be an absolute POSIX path');
+    throw new Error('Client mount prefix must be an absolute POSIX path');
   }
   const parts = validateRelativePath(relativePath);
   return path.posix.join(prefix, ...parts);

@@ -44,7 +44,7 @@ export function buildServer(
   if (catalog) {
     const auth = createAuth(server, catalog.pool, catalog.secureCookie);
     registerCatalog(server, catalog, auth);
-    registerRequests(server, catalog.pool, auth, catalog.indexer);
+    registerRequests(server, catalog.pool, auth);
     registerImports(server, catalog.pool, auth);
     registerImportIntake(server, catalog.pool, auth, catalog.root, catalog.importStorage);
     registerSourceDiscovery(server, catalog.pool, auth, catalog);

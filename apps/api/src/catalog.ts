@@ -28,7 +28,7 @@ export type GeometryReader = (handle: FileHandle) => Promise<{
   sampled: boolean;
 }>;
 export type CatalogOptions = {
-  pool: Pool; root: string; clientMountPrefix?: string; indexer: Indexer;
+  pool: Pool; root?: string; indexer: Indexer;
   managedRoot?: string;
   managedClientMountPrefix?: string;
   read3mfThumbnail?: ThumbnailReader;
@@ -110,7 +110,7 @@ async function scanStatus(pool: Pool, indexer: Indexer) {
   };
 }
 
-async function projectById(pool: Pool, id: string): Promise<ProjectRow | undefined> {
+async function projectById(pool: Pool, id: string, storageKind = 'managed'): Promise<ProjectRow | undefined> {
   if (!isProjectId(id)) return undefined;
   const result = await pool.query<ProjectRow>(
     `SELECT p.id, p.name, p.storage_kind, p.relative_path, c.relative_path AS category_path, p.description,
@@ -125,8 +125,8 @@ async function projectById(pool: Pool, id: string): Promise<ProjectRow | undefin
             AND ${previewable} ORDER BY CASE WHEN a.kind = 'image' THEN 0 WHEN lower(a.extension) = '.stl' THEN 1 ELSE 2 END,
              a.sort_order LIMIT 1)
        ) AS preview_asset_id
-     FROM projects p LEFT JOIN categories c ON c.id = p.category_id WHERE p.id = $1`,
-    [id],
+     FROM projects p LEFT JOIN categories c ON c.id = p.category_id WHERE p.id = $1 AND p.storage_kind = $2`,
+    [id, storageKind],
   );
   return result.rows[0];
 }
@@ -136,7 +136,8 @@ async function assetById(pool: Pool, id: string): Promise<AssetRow | undefined> 
     `SELECT a.id, a.project_id, p.storage_kind, a.relative_path, a.project_relative_path, a.name, a.kind,
        a.extension, a.sort_order, a.size_bytes, a.mtime_ms, a.current_version_id,
        a.missing_at, v.validation_error, v.content_hash FROM assets a JOIN projects p ON p.id = a.project_id
-       LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.id = $1`,
+       LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.id = $1
+         AND p.storage_kind = 'managed' AND a.storage_kind = 'managed'`,
     [id],
   );
   return result.rows[0];
@@ -175,7 +176,7 @@ function libraryError(reply: FastifyReply, error: unknown) {
   if (error instanceof LibraryUnavailableError) return reply.code(503).send({ error: error.message });
   if (error instanceof Error && 'code' in error &&
     (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
-    return reply.code(410).send({ error: 'File is no longer available; rescan the library' });
+    return reply.code(410).send({ error: 'Managed file is no longer available; ask an operator to inspect storage' });
   }
   if (error instanceof Error && 'code' in error && error.code === 'ELOOP') {
     return reply.code(422).send({ error: 'Symlinked library paths are not allowed' });
@@ -188,11 +189,8 @@ function libraryError(reply: FastifyReply, error: unknown) {
 }
 
 export function registerCatalog(server: FastifyInstance, options: CatalogOptions, auth: Auth) {
-  const { pool, root, indexer, clientMountPrefix: mount } = options;
-  const mountFor = (row: ProjectRow | AssetRow) =>
-    row.storage_kind === 'managed' ? options.managedClientMountPrefix : mount;
-  function rootFor(asset: AssetRow): string {
-    if (asset.storage_kind !== 'managed') return root;
+  const { pool, indexer } = options;
+  function managedRoot(): string {
     if (!options.managedRoot) {
       const error = new LibraryUnavailableError();
       error.message = 'Managed storage is unavailable';
@@ -203,23 +201,30 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
   const preview = createPreviewLimiter();
   const verifyDownload = createPreviewLimiter();
   let rescanPending = false;
+  let rescanError: string | null = null;
 
-  server.get('/catalog/status', { preHandler: auth.authenticate }, async () => {
+  server.get('/library/legacy-scan', { preHandler: auth.operatorOnly }, async () => {
     const scan = await scanStatus(pool, indexer);
     const errors = scan.lastScan?.id ? await pool.query<{ relative_path: string | null; code: string; message: string }>(
       'SELECT relative_path, code, message FROM scan_errors WHERE run_id = $1 ORDER BY relative_path NULLS FIRST LIMIT 25',
       [scan.lastScan.id],
     ) : null;
-    return { scan: { ...scan, state: rescanPending ? 'running' : scan.state, errors: errors?.rows ?? [] } };
+    return { configured: Boolean(options.root), scan: { ...scan, state: rescanPending ? 'running' : rescanError ? 'failed' : scan.state,
+      lastError: rescanError ?? scan.lastError, errors: errors?.rows ?? [] } };
   });
 
-  server.post('/catalog/rescan', { preHandler: auth.operatorOnly }, async (_request, reply) => {
+  server.post('/library/legacy-scan', { preHandler: auth.operatorOnly }, async (_request, reply) => {
+    if (!options.root) return reply.code(503).send({ error: 'Configure LEGACY_LIBRARY_ROOT to index a library for migration' });
     if (rescanPending || indexer.getStatus().running) {
       return reply.code(409).send({ error: 'A rescan is already running' });
     }
     rescanPending = true;
+    rescanError = null;
     void indexer.rescan()
-      .catch((error: unknown) => server.log.error({ err: error }, 'Library rescan failed'))
+      .catch((error: unknown) => {
+        rescanError = error instanceof Error ? error.message : 'Legacy migration indexing failed; check the server log';
+        server.log.error({ err: error }, 'Legacy migration indexing failed');
+      })
       .finally(() => { rescanPending = false; });
     return reply.code(202).send({ scan: { ...await scanStatus(pool, indexer), state: 'running' } });
   });
@@ -240,7 +245,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       const { q = '', category, fileType } = request.query;
       const page = Math.min(Number(request.query.page ?? 1), 100000);
       const pageSize = Math.min(Number(request.query.pageSize ?? 24), 50);
-      const where = `($1 = '' OR ${searchableProject} @@ plainto_tsquery('simple', $1)
+      const where = `p.storage_kind = 'managed' AND ($1 = '' OR ${searchableProject} @@ plainto_tsquery('simple', $1)
         OR ${searchableCategory} @@ plainto_tsquery('simple', $1)
         OR EXISTS (SELECT 1 FROM assets a WHERE a.project_id = p.id AND
           to_tsvector('simple', coalesce(a.name,'') || ' ' || coalesce(a.project_relative_path,''))
@@ -269,13 +274,12 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
         [...values, pageSize, (page - 1) * pageSize],
       );
       const categories = await pool.query<{ category: string }>(
-        "SELECT DISTINCT split_part(c.relative_path, '/', 1) AS category FROM categories c JOIN projects p ON p.category_id = c.id ORDER BY category",
+        "SELECT DISTINCT split_part(c.relative_path, '/', 1) AS category FROM categories c JOIN projects p ON p.category_id = c.id WHERE p.storage_kind = 'managed' ORDER BY category",
       );
       return {
-        items: rows.rows.map((row) => summary(row, mountFor(row))), total: Number(count.rows[0].total),
+        items: rows.rows.map((row) => summary(row, options.managedClientMountPrefix)), total: Number(count.rows[0].total),
         page, pageSize, categories: categories.rows.map((row) => row.category),
         fileTypes: ['mesh', 'source', 'image', 'document', 'print', 'other'],
-        scan: await scanStatus(pool, indexer),
       };
     },
   );
@@ -289,15 +293,15 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       `SELECT a.id, a.project_id, p.storage_kind, a.relative_path, a.project_relative_path, a.name, a.kind,
          a.extension, a.sort_order, a.size_bytes, a.mtime_ms, a.current_version_id,
          a.missing_at, v.validation_error FROM assets a JOIN projects p ON p.id = a.project_id
-         LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.project_id = $1`,
+         LEFT JOIN asset_versions v ON v.id = a.current_version_id WHERE a.project_id = $1 AND a.storage_kind = 'managed'`,
       [row.id],
     );
     return { project: {
-      ...summary(row, mountFor(row)), designer: row.designer, sourceUrl: safeSource(row.source_url),
+      ...summary(row, options.managedClientMountPrefix), designer: row.designer, sourceUrl: safeSource(row.source_url),
       license: row.license, notes: row.notes, isBoundary: row.is_boundary,
       files: assets.rows.sort((a, b) =>
         a.sort_order - b.sort_order || natural.compare(a.project_relative_path, b.project_relative_path))
-        .map((asset) => assetResponse(asset, mountFor(asset))),
+        .map((asset) => assetResponse(asset, options.managedClientMountPrefix)),
     } };
   });
 
@@ -334,16 +338,16 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     const values = keys.map((key) => input[key as keyof typeof input]);
     const result = await pool.query(
       `UPDATE projects SET ${keys.map((key, index) => `${fields[key]} = $${index + 2}`).join(', ')},
-       updated_at = now() WHERE id = $1 RETURNING id`,
+       updated_at = now() WHERE id = $1 AND storage_kind = 'managed' RETURNING id`,
       [request.params.id, ...values],
     );
     if (!result.rowCount) return reply.code(404).send({ error: 'Project not found' });
     const project = await projectById(pool, request.params.id);
-    return { project: summary(project!, mount) };
+    return { project: summary(project!, options.managedClientMountPrefix) };
   });
 
   server.put<{ Body: { projectId: string; isBoundary: boolean } |
-    { relativePath: string; kind: 'project' | 'collection' } }>('/catalog/boundaries', {
+    { relativePath: string; kind: 'project' | 'collection' } }>('/library/legacy-boundaries', {
     preHandler: auth.operatorOnly,
     schema: { body: {
       oneOf: [
@@ -361,12 +365,13 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       ],
     } },
   }, async (request, reply) => {
+    if (!options.root) return reply.code(503).send({ error: 'Configure LEGACY_LIBRARY_ROOT before changing legacy migration boundaries' });
     let relativePath: string;
     let kind: 'project' | 'collection' = 'project';
     let isBoundary = true;
     let projectId: string | null = null;
     if ('projectId' in request.body) {
-      const project = await projectById(pool, request.body.projectId);
+      const project = await projectById(pool, request.body.projectId, 'legacy');
       if (!project) return reply.code(404).send({ error: 'Project not found' });
       if (project.storage_kind === 'managed') {
         return reply.code(400).send({ error: 'Boundary overrides apply only to legacy projects' });
@@ -395,13 +400,14 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     return { projectId, relativePath, kind, isBoundary };
   });
 
-  server.delete<{ Body: { relativePath: string } }>('/catalog/boundaries', {
+  server.delete<{ Body: { relativePath: string } }>('/library/legacy-boundaries', {
     preHandler: auth.operatorOnly,
     schema: { body: {
       type: 'object', additionalProperties: false, required: ['relativePath'],
       properties: { relativePath: { type: 'string', minLength: 1, maxLength: 2048 } },
     } },
   }, async (request, reply) => {
+    if (!options.root) return reply.code(503).send({ error: 'Configure LEGACY_LIBRARY_ROOT before changing legacy migration boundaries' });
     try {
       validateRelativePath(request.body.relativePath);
     } catch (error) {
@@ -427,10 +433,10 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
       return reply.code(410).send({ error: 'Requested version is unavailable' });
     }
     try {
-      const { handle, stats } = await openLibraryFile(rootFor(asset), asset.relative_path);
+      const { handle, stats } = await openLibraryFile(managedRoot(), asset.relative_path);
       if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
         await handle.close();
-        return reply.code(409).send({ error: 'File changed since indexing; rescan before downloading' });
+        return reply.code(409).send({ error: 'Managed file changed; inspect storage before downloading' });
       }
       if (request.query.versionId) {
         try {
@@ -443,7 +449,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
           });
           if (!unchanged) {
             await handle.close();
-            return reply.code(409).send({ error: 'File content changed since indexing; rescan before downloading' });
+            return reply.code(409).send({ error: 'Managed file content changed; inspect storage before downloading' });
           }
         } catch (error) {
           await handle.close();
@@ -467,7 +473,7 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     if (asset.missing_at || !asset.current_version_id) return reply.code(410).send({ error: 'Preview source is unavailable' });
     if (asset.validation_error) return reply.code(422).send({ error: 'Indexed preview is invalid; inspect scan status' });
     try {
-      const { handle, stats } = await openLibraryFile(rootFor(asset), asset.relative_path);
+      const { handle, stats } = await openLibraryFile(managedRoot(), asset.relative_path);
       try {
         if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
           return reply.code(409).send({ error: 'Preview source changed since indexing' });
@@ -533,10 +539,10 @@ export function registerCatalog(server: FastifyInstance, options: CatalogOptions
     }
     try {
       return await preview(async () => {
-        const { handle, stats } = await openLibraryFile(rootFor(asset), asset.relative_path);
+        const { handle, stats } = await openLibraryFile(managedRoot(), asset.relative_path);
         try {
           if (stats.size !== Number(asset.size_bytes) || Math.abs(stats.mtimeMs - Number(asset.mtime_ms)) > 1) {
-            return reply.code(409).send({ error: 'Mesh changed since indexing; rescan before previewing' });
+            return reply.code(409).send({ error: 'Managed mesh changed; inspect storage before previewing' });
           }
           const geometry = extension === '.3mf'
             ? await options.read3mfGeometry!(handle)

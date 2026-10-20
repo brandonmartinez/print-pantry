@@ -99,8 +99,8 @@ export async function safeDirectory(root: string, path = '') {
   return current;
 }
 
-export async function validateStorage(storage: ImportStorage, legacyRoot: string) {
-  const roots = [storage.intakeRoot, storage.managedRoot, legacyRoot].map((root) => resolve(root));
+export async function validateStorage(storage: ImportStorage, legacyRoot?: string) {
+  const roots = [storage.intakeRoot, storage.managedRoot, ...(legacyRoot ? [legacyRoot] : [])].map((root) => resolve(root));
   function separate(paths: string[]) {
     for (let i = 0; i < paths.length; i++) for (let j = i + 1; j < paths.length; j++) {
       const path = relative(paths[i], paths[j]);
@@ -113,8 +113,22 @@ export async function validateStorage(storage: ImportStorage, legacyRoot: string
   separate(roots);
   await safeDirectory(storage.intakeRoot);
   await safeDirectory(storage.managedRoot);
+  const writableIdentities = await Promise.all([storage.intakeRoot, storage.managedRoot].map((root) => lstat(root)));
+  if (writableIdentities[0].dev === writableIdentities[1].dev && writableIdentities[0].ino === writableIdentities[1].ino) {
+    throw new IntakeError('Intake and managed roots must not be mounts of the same directory', 503);
+  }
+  if (!legacyRoot) {
+    separate([await realpath(storage.intakeRoot), await realpath(storage.managedRoot)]);
+    return;
+  }
   let canonicalLegacy = roots[2];
-  try { canonicalLegacy = await realpath(legacyRoot); } catch (error) {
+  try {
+    canonicalLegacy = await realpath(legacyRoot);
+    const legacyIdentity = await lstat(canonicalLegacy);
+    if (writableIdentities.some((stats) => stats.dev === legacyIdentity.dev && stats.ino === legacyIdentity.ino)) {
+      throw new IntakeError('Writable storage must not be another mount of the legacy source directory', 503);
+    }
+  } catch (error) {
     if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
   }
   separate([await realpath(storage.intakeRoot), await realpath(storage.managedRoot), canonicalLegacy]);

@@ -110,13 +110,16 @@ it('checks explicitly, then submits a source and optional details without upload
   expect(calls.every((call) => !call.path.includes('upload'))).toBe(true);
 });
 
-it('requires explicit override for an existing project and explains joining a pending import', async () => {
+it.each(['legacy', 'managed'] as const)('requires explicit duplicate override for %s storage without linking migration-only projects', async (storageKind) => {
   const { calls } = setup({
     items: [],
-    match: { projects: [{ id: '9007199254740993', name: 'Library tray', available: false }], pending: { id: 'import-1', status: 'awaiting_files' } },
+    match: { projects: [{ id: '9007199254740993', name: 'Library tray', available: false, storageKind }], pending: { id: 'import-1', status: 'awaiting_files' } },
   });
   await checkSource();
-  expect(screen.getByRole('link', { name: 'View Library tray' }).getAttribute('href')).toBe('/projects/9007199254740993');
+  if (storageKind === 'legacy') {
+    expect(screen.queryByRole('link', { name: 'View Library tray' })).toBeNull();
+    expect(screen.getByText(/Library tray.*migration required/)).toBeTruthy();
+  } else expect(screen.getByRole('link', { name: 'View Library tray' }).getAttribute('href')).toBe('/projects/9007199254740993');
   expect(screen.getByText(/Submitting will join that shared import/)).toBeTruthy();
   expect((screen.getByRole('button', { name: 'Join existing import' }) as HTMLButtonElement).disabled).toBe(true);
   expect(calls.filter((call) => call.path === '/api/imports')).toHaveLength(0);

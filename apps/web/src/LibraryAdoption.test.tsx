@@ -130,7 +130,8 @@ it('refreshes durable revision and surfaces failed commands instead of showing s
 
 it('filters outcomes and paginates with exact decimal-string cursors, keeping evidence accessible', async () => {
   const { request } = setup({ nextCursor: '9007199254740993' });
-  await screen.findByRole('link', { name: 'Eligible holder' });
+  await screen.findByText('Eligible holder');
+  expect(screen.queryByRole('link', { name: 'Eligible holder' })).toBeNull();
   expect(screen.getAllByRole('link', { name: 'Review saved project plan' })).toHaveLength(2);
   expect(screen.getByText('Model file is missing.')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Next outcomes' }));

@@ -14,14 +14,12 @@ services:
       DEV_SEED_USER: "true"
       API_PORT: "3000"
       WEB_PORT: "5173"
-      LIBRARY_ROOT: /mnt/library
+      LEGACY_LIBRARY_ROOT: ${LEGACY_LIBRARY_HOST_PATH:+/mnt/legacy-library}
       IMPORT_STORAGE_ROOT: /workspace/.pantry-data/intake
-      MANAGED_LIBRARY_ROOT: /workspace/.pantry-data/library
+      MANAGED_LIBRARY_ROOT: ${MANAGED_LIBRARY_HOST_PATH:+/mnt/managed-library}
       MANAGED_CLIENT_MOUNT_PREFIX: ${MANAGED_CLIENT_MOUNT_PREFIX:-}
-      LIBRARY_IGNORED_DIRS: ${LIBRARY_IGNORED_DIRS:-}
-      LIBRARY_ALLOW_EMPTY: ${LIBRARY_ALLOW_EMPTY:-false}
-      CLIENT_MOUNT_PREFIX: ${CLIENT_MOUNT_PREFIX:-}
-      SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-30}
+      LEGACY_LIBRARY_IGNORED_DIRS: ${LEGACY_LIBRARY_IGNORED_DIRS:-}
+      LEGACY_LIBRARY_ALLOW_EMPTY: ${LEGACY_LIBRARY_ALLOW_EMPTY:-false}
       COOKIE_SECURE: "false"
       NPM_CONFIG_USERCONFIG: /home/node/.npmrc
       NPM_CONFIG_CAFILE: ${HOST_NPM_CA_FILE:+/run/pantry-npm-ca.pem}
@@ -41,7 +39,8 @@ services:
       - ${SSH_AUTHORIZED_KEYS_FILE:-./.devcontainer/authorized_keys.example}:/run/pantry-authorized-keys:ro
       - ${HOST_NPM_CONFIG_FILE:?Set HOST_NPM_CONFIG_FILE to your existing external npm user config}:/home/node/.npmrc:ro
       - ${HOST_NPM_CA_FILE:-./.devcontainer/ca.example.pem}:/run/pantry-npm-ca.pem:ro
-      - ${LIBRARY_HOST_PATH:-./.devcontainer/empty-library}:/mnt/library:ro
+      - ${LEGACY_LIBRARY_HOST_PATH:-./.devcontainer/empty-library}:/mnt/legacy-library:ro
+      - ${MANAGED_LIBRARY_HOST_PATH:-./.devcontainer/empty-library}:/mnt/managed-library
     ports:
       - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-5173}:5173"
       - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-3000}:3000"

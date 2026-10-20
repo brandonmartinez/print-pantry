@@ -67,11 +67,13 @@ cannot close another person's work by canceling a shared record.
 ## Storage and organization
 
 Development defaults to the ignored `.pantry-data/intake` and
-`.pantry-data/library` directories in the repository. Set both
-`IMPORT_STORAGE_ROOT` and `MANAGED_LIBRARY_ROOT` to override them. Production
+`.pantry-data/library` directories in the repository. Outside Compose, set both
+`IMPORT_STORAGE_ROOT` and `MANAGED_LIBRARY_ROOT` to override them. In Compose,
+set `MANAGED_LIBRARY_HOST_PATH` to an existing, application-writable host/NAS
+directory; Compose supplies the corresponding in-container managed root. Production
 requires both explicitly; the production Compose configuration supplies
-independent persistent volumes. All three roots, including `LIBRARY_ROOT`,
-must be separate, non-nested, and have no symlink components.
+independent persistent volumes by default. All configured roots, including the
+optional `LEGACY_LIBRARY_ROOT`, must be separate, non-nested, and have no symlink components.
 
 Published projects use:
 
@@ -345,8 +347,9 @@ adopting real projects. Retaining originals is not a backup.
 3. Choose **Copy and verify** for one project. Files and empty directories go
    into private managed staging, with an internal recovery manifest. The app
    freshly checks indexed hashes against source bytes, copied bytes, and source
-   bytes again. Legacy remains authoritative and existing catalog rows do not
-   switch. Verify existing downloads and requests still work.
+   bytes again. Existing catalog rows do not switch. Legacy projects remain
+   migration-only: they are hidden from normal browsing/downloads, and any
+   historical print-request files remain `migration_required` until activation.
 4. Choose **Activate managed copy**, then **Confirm activation**. Inventory,
    hashes, catalog evidence, root identity, and destination ownership are checked
    again. The verified directory is published at the proposed path and existing
@@ -361,7 +364,9 @@ adopting real projects. Retaining originals is not a backup.
 6. To test recovery, choose **Restore legacy location**, then **Confirm
    restoration**. Both copies must still match the approved inventory and bytes,
    and current file identities/versions must be unchanged. The catalog switches
-   back without editing either copy. Later display-metadata changes are retained,
+   back to migration-only legacy storage without editing either copy. The
+   project disappears from the live library; historical requests remain with
+   unavailable files until another approved activation. Later display-metadata changes are retained,
    including across subsequent legacy scans. The managed copy remains in place.
 
 Each project has its own status and last error. The job uses optimistic revisions
@@ -375,7 +380,7 @@ An interrupted copy remains `copying`; **Retry copy and verify** recreates only
 that journal's private staging directory and verifies the source again. An
 interrupted activation resumes using the exact manifest/inventory/hash-verified
 destination rather than overwriting it or allocating new IDs. Failures keep
-legacy authoritative unless catalog activation has already committed. Never edit
+migration-only legacy storage unchanged unless catalog activation has already committed. Never edit
 manifests to force acceptance.
 
 **Cancel remaining migration** requires confirmation. It cancels only pending,
@@ -432,7 +437,7 @@ must remain running; the utility is not an offline database/filesystem importer.
    mount or automatically the NAS. Production Compose uses a dedicated Docker
    volume by default. For host/NAS storage, supply separate, persistent bind
    mounts and matching `IMPORT_STORAGE_ROOT` / `MANAGED_LIBRARY_ROOT` settings.
-   Neither root may be inside the read-only `LIBRARY_ROOT`.
+   Neither root may be inside the read-only `LEGACY_LIBRARY_ROOT`.
 2. Scan the existing read-only library. Its project boundaries, classifications,
    and app-generated IDs form the initial catalog; review uncertain boundaries
    and recover/approve sources where appropriate. This workflow does not guess
@@ -444,8 +449,8 @@ must remain running; the utility is not an offline database/filesystem importer.
    `/manage-library?adoption=<id>`; recent runs can be reopened after reload.
 5. Acknowledge verified backups, retention, notes, and projects left behind.
    Choose **Approve batch copy and verification**. Progress updates automatically.
-6. Wait for **Verified copies await activation approval**. Projects still use
-   legacy files. Check results, then **Review batch activation → Confirm batch
+6. Wait for **Verified copies await activation approval**. Projects remain
+   hidden from the live library. Check results, then **Review batch activation → Confirm batch
    activation** once for the verified eligible projects.
 7. Check downloads, previews, metadata and existing requests on a small
    synthetic library first. A partial result is not a completed migration:
@@ -515,6 +520,18 @@ cancel server work. The same plan can be created in the UI and controlled by the
 utility, or vice versa; refresh before acting in another client.
 
 Runs require separate **copy/verify approval** and **batch activation approval**.
+`MANAGED_LIBRARY_ROOT` is the live library; the optional `LEGACY_LIBRARY_ROOT`
+is migration-only. In Compose, configure `MANAGED_LIBRARY_HOST_PATH` for a
+writable host/NAS destination and `LEGACY_LIBRARY_HOST_PATH` only for an old
+read-only source. Leave legacy unset for a new installation. Normal catalog
+and file endpoints never serve legacy content.
+
+Index a configured legacy source explicitly from **Manage library → Index
+legacy library for migration** or the authenticated CLI command `index --wait`
+before planning. Indexing does not run on startup or a timer. Its operator-only
+status and trigger endpoint is `/api/library/legacy-scan`. Legacy boundary
+overrides and source recovery live under each inventory row's **Show migration
+tools**; after changing a boundary, index again before planning.
 The runner continues eligible projects after independently blocked/failed
 projects and explicitly reports partial results. Disk/root/database failures
 pause the run instead. Pause/cancel takes effect between project operations;

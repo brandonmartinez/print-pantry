@@ -42,7 +42,7 @@ before starting the API and web processes; CI exercises migrations against
 `print_pantry_test`. For host-only
 development, provide your own isolated PostgreSQL, set `DATABASE_URL`,
 `TEST_DATABASE_URL` (the latter must point to `print_pantry_test`), and
-`LIBRARY_ROOT` to an **unrelated synthetic/test directory**, then run
+optionally `LEGACY_LIBRARY_ROOT` to an **unrelated synthetic/test migration directory**, then run
 `npm run build && npm test && npm run dev`. Never target
 an external or production database with the test URL.
 
@@ -74,9 +74,12 @@ separate filesystem-moving script. See the
 See the [library adoption testing checkpoint](docs/import-queue.md#library-adoption-copy-verify-activate-and-restore)
 before proceeding with library adoption.
 
-Mount the library **read-only** at `LIBRARY_ROOT` (the development container
-uses `/mnt/library`). Point `LIBRARY_HOST_PATH` at a **test library only** while
-developing; do not test against the NAS. `CLIENT_MOUNT_PREFIX` is a separate,
+The live catalog, downloads, previews, and new print requests use **managed
+storage only**. `MANAGED_LIBRARY_ROOT` is the API's writable live-library path.
+In Compose, set `MANAGED_LIBRARY_HOST_PATH` to an existing, application-writable
+host/NAS directory to bind-mount it. When blank, development uses the ignored
+workspace `.pantry-data/library`; production uses `pantry_managed_library`.
+`MANAGED_CLIENT_MOUNT_PREFIX` is a separate,
 absolute POSIX path visible to the browser operator, for example a locally
 mounted share. It is optional: without it, the UI shows relative paths but
 does not claim to know a usable local path. Never put an internal container
@@ -84,21 +87,38 @@ path in this setting unless clients can actually access it. Copy-path uses
 the browser clipboard and shows the path for manual copying if permission
 is denied. Downloads are authenticated; local `file://` opening is not assumed.
 
-Set `LIBRARY_IGNORED_DIRS` to comma-separated directory **names** to skip
+An old library is optional and used **only for migration**. Set
+`LEGACY_LIBRARY_HOST_PATH` in Compose to mount it read-only at
+`LEGACY_LIBRARY_ROOT=/mnt/legacy-library`. Outside Compose, set
+`LEGACY_LIBRARY_ROOT` directly. Leave these unset for a fresh managed-only
+installation. Legacy projects remain in **Manage library**, but are hidden
+from normal browsing and cannot serve files or new print requests until
+activation. Restoration hides them again; historical requests are retained
+with `migration_required` file availability.
+
+Set `LEGACY_LIBRARY_IGNORED_DIRS` to comma-separated directory **names** to skip
 for your library (for example `recovery,temp,private`). Only explicitly
 configured names are ignored; underscore-prefixed collections remain eligible.
-`SCAN_INTERVAL_MINUTES` defaults to 30. An initial scan runs when the API
-starts, and operator-only `POST /api/catalog/rescan` starts a manual scan;
-`GET /api/catalog/status` exposes scan failures and timestamps. Failed,
+There is no startup or scheduled legacy scan. In **Manage library**, choose
+**Index legacy library for migration**, or use `npm run library -- index`
+with operator credentials. Operator-only `POST /api/library/legacy-scan` starts indexing;
+`GET /api/library/legacy-scan` exposes scan failures and timestamps. Failed,
 partial, or offline scans do not mark every file missing. The database retains
 stable IDs, historical versions, and user-authored metadata when files change.
 An unexpectedly empty previously populated mount is treated as non-authoritative,
-including when placeholder directories remain. Set `LIBRARY_ALLOW_EMPTY=true`
+including when placeholder directories remain. Set `LEGACY_LIBRARY_ALLOW_EMPTY=true`
 **only** if the mount is known healthy and you intentionally want a completely
 empty library to mark prior entries missing; the default is safer for a NAS.
 Boundary overrides and metadata edits require the operator role; changing a
 boundary takes effect on the next rescan. Scanning never moves, renames, or
-deletes library files.
+deletes library files. Do not test against a real NAS library.
+
+Configuration change: rename `LIBRARY_HOST_PATH` / `LIBRARY_ROOT` to their
+`LEGACY_` equivalents and recreate the containers (rebuild/reopen the dev
+container). Old `LIBRARY_ROOT` is rejected, not treated as live storage.
+`SCAN_INTERVAL_MINUTES` and the legacy `CLIENT_MOUNT_PREFIX` are no longer
+used. Cancel active migration plans before changing roots, then make fresh
+plans; retained historical previews are not new approvals.
 
 In the local Compose environment, `npm run dev` creates an initial operator
 account only when the `print_pantry_dev` database has no users. Sign in with
@@ -128,7 +148,7 @@ stable asset/version IDs. File downloads use
 `GET /api/catalog/assets/:id/download`; requesting an unavailable historical
 version returns 410 rather than silently substituting a different file.
 Operator metadata edits use `PATCH /api/catalog/projects/:id`; explicit
-project-boundary overrides use `PUT /api/catalog/boundaries`. Authentication
+project-boundary overrides use `PUT /api/library/legacy-boundaries`. Authentication
 uses `/api/auth/login`, `/api/auth/me`, and `/api/auth/logout`. Frontend and
 external clients must forward the session cookie. Generated STL thumbnails,
 validated images, embedded 3MF thumbnails, and the lazy, sampled interactive
@@ -139,7 +159,7 @@ does not scrape external sites; operators can upload files through Imports.
 The operator UI can mark a project folder as an explicit boundary. For a deeper
 collection that the default grouping misclassifies, the same operator-only
 boundary endpoint also accepts `{"relativePath":"Category/Collection","kind":"collection"}`
-or `"kind":"project"`; `DELETE /api/catalog/boundaries` with the same
+or `"kind":"project"`; `DELETE /api/library/legacy-boundaries` with the same
 `relativePath` removes an override. These are library-relative directory
 paths, not absolute host paths. Rescan after changing a boundary.
 
@@ -238,8 +258,8 @@ browser suite in `tests/browser/` fails closed unless
 `http://127.0.0.1:<web-port>`, `PANTRY_E2E_BROWSER_PATH` names an already
 installed Chromium-compatible browser, and `PANTRY_E2E_PASSWORD` is the
 synthetic accounts' password. Set `PANTRY_E2E_SYNTHETIC_LIBRARY_ROOT` to the
-host directory of the generated STL fixture, mounted read-only in the
-container. It must live under a Copilot session-state directory or a
+host directory of the generated, already-registered managed STL fixture, mounted
+as managed storage in the container. It must live under a Copilot session-state directory or a
 `print-pantry-e2e-*` temporary directory; the suite verifies the exact
 generated STL content before temporarily moving it and restores it afterward.
 The accounts are named `syntheticoperator` and `syntheticrequester`.
@@ -332,8 +352,8 @@ Open **http://127.0.0.1:5173** for the shell and
 `.env` if already occupied; Compose reports a bind error rather than stopping
 another process. PostgreSQL is reachable only inside the Compose network.
 Development database data, SSH **host keys**, npm cache, and `node_modules`
-have separate persistent Docker volumes. The optional `LIBRARY_HOST_PATH`
-mounts a host directory at `/mnt/library` **read-only**; its default is an
+have separate persistent Docker volumes. The optional `LEGACY_LIBRARY_HOST_PATH`
+mounts a host directory at `/mnt/legacy-library` **read-only**; its default is an
 empty synthetic directory. Do not use a real library for tests.
 
 Open this repository using **Dev Containers: Reopen in Container**. The

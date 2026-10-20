@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from '@playwright/test';
 
 const baseURL = process.env.PANTRY_E2E_BASE_URL;
 const browserPath = process.env.PANTRY_E2E_BROWSER_PATH;
@@ -57,22 +57,6 @@ async function createRequesterContext(browser: Browser, mobile: boolean) {
     permissions: ['clipboard-read', 'clipboard-write'],
     acceptDownloads: true,
   });
-}
-
-async function rescan(context: BrowserContext) {
-  const before = await (await context.request.get('/api/catalog/status')).json() as {
-    scan: { lastScan?: { id: string } };
-  };
-  const trigger = await context.request.post('/api/catalog/rescan', {
-    headers: { Origin: new URL(baseURL!).origin },
-  });
-  expect(trigger.status()).toBe(202);
-  await expect.poll(async () => {
-    const result = await (await context.request.get('/api/catalog/status')).json() as {
-      scan: { state: string; lastScan?: { id: string } };
-    };
-    return result.scan.lastScan?.id !== before.scan.lastScan?.id && result.scan.state === 'succeeded';
-  }, { timeout: 30_000 }).toBe(true);
 }
 
 for (const mobile of [false, true]) {
@@ -171,7 +155,7 @@ for (const mobile of [false, true]) {
   });
 }
 
-test('missing exact version remains visible without substituting a file', async ({ browser }, testInfo) => {
+test('missing managed bytes fail exact download without substituting a file', async ({ browser }, testInfo) => {
   const resolvedRoot = await realpath(libraryRoot!);
   if (!resolvedRoot.includes('/.copilot/session-state/') &&
     !resolvedRoot.startsWith(`${join(tmpdir(), 'print-pantry-e2e-')}`)) {
@@ -205,25 +189,21 @@ test('missing exact version remains visible without substituting a file', async 
 
     await rename(original, staged);
     moved = true;
-    await rescan(operator);
     await page.getByRole('button', { name: 'Requests' }).click();
     const card = page.locator('.request-card').filter({ hasText: `Request ${id}` });
-    await expect(card.getByText('The selected source file is no longer available.')).toBeVisible();
-    await expect(card.getByText('Exact version unavailable')).toBeVisible();
+    await expect(card.getByRole('link', { name: 'Download version' })).toBeVisible();
     const version = `/api/catalog/assets/${selected.assetId}/download?versionId=${selected.versionId}`;
     expect((await requester.request.get(version)).status()).toBe(410);
     await page.screenshot({ path: testInfo.outputPath('source-unavailable.png') });
 
     await rename(staged, original);
     moved = false;
-    await rescan(operator);
     await page.getByRole('button', { name: 'Refresh' }).click();
     await expect(card.getByRole('link', { name: 'Download version' })).toBeVisible();
     expect((await requester.request.get(version)).status()).toBe(200);
   } finally {
     if (moved) {
       await rename(staged, original);
-      await rescan(operator);
     }
     await requester.close();
     await operator.close();
