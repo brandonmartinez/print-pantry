@@ -112,6 +112,42 @@ export interface LibraryManagementResponse {
   plans: Array<{ id: string; createdAt: string; projectCount: number }>;
 }
 
+export type LibraryAdoptionState = 'planning' | 'review' | 'copying' | 'awaiting_activation' | 'activating' |
+  'restoring' | 'canceling' | 'paused' | 'completed' | 'partial' | 'canceled' | 'restored';
+export type LibraryAdoptionItemStatus = 'pending' | 'ready' | 'blocked' | 'copying' | 'copied' | 'activated' | 'failed' | 'restored' | 'canceled';
+export type LibraryAdoptionCommand = 'approve_copy' | 'activate' | 'pause' | 'resume' | 'retry' | 'cancel' | 'restore';
+export interface LibraryAdoptionRun {
+  id: string;
+  state: LibraryAdoptionState;
+  resumeState: LibraryAdoptionState | null;
+  revision: number;
+  fingerprint: string;
+  legacyRoot: string;
+  managedRoot: string;
+  additionalBytes: string;
+  availableBytes: string | null;
+  counts: Record<LibraryAdoptionItemStatus, number>;
+  total: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface LibraryAdoptionItem {
+  projectId: string;
+  name: string;
+  status: LibraryAdoptionItemStatus;
+  planId: string | null;
+  migrationId: string | null;
+  sizeBytes: string;
+  fileCount: number;
+  issues: LibraryPlanIssue[];
+  lastError: string | null;
+}
+export interface LibraryAdoptionItems {
+  items: LibraryAdoptionItem[];
+  nextCursor: string | null;
+}
+
 export interface ReadinessResponse {
   status: 'ready' | 'unavailable';
 }

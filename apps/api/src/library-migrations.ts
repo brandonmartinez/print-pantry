@@ -62,7 +62,7 @@ async function roots(options: CatalogOptions): Promise<RootIdentities> {
   }));
   return { legacy: result[0], managed: result[1] };
 }
-async function checkedRoots(job: Job, options: CatalogOptions) {
+async function checkedRoots(job: Pick<Job, 'legacy_root' | 'managed_root' | 'root_identities'>, options: CatalogOptions) {
   if (resolve(options.root) !== job.legacy_root || !options.managedRoot || resolve(options.managedRoot) !== job.managed_root ||
     !isDeepStrictEqual(await roots(options), job.root_identities)) {
     throw new IntakeError('Storage configuration or root identity changed. Restore the approved mounts before resuming.', 409);
@@ -192,9 +192,7 @@ async function destinationFree(job: Job, item: Item, client: Connection) {
     AND (lower(relative_path)=lower($2) OR starts_with(lower(relative_path),lower($2)||'/') OR starts_with(lower($2),lower(relative_path)||'/')) LIMIT 1`,
   [item.project_id, item.managed_path]);
   if (conflict.rowCount) throw new IntakeError('Destination overlaps another catalog project', 409);
-  let entries = 0;
   for await (const entry of await opendir(join(job.managed_root, 'projects'))) {
-    if (++entries > libraryPreviewLimits.entries) throw new IntakeError('Destination inspection exceeds 2,000 entries; review managed storage before continuing', 409);
     if (pathKey(entry.name) === pathKey(item.managed_path.split('/')[1]) && entry.name !== item.managed_path.split('/')[1]) {
       throw new IntakeError('A case-equivalent destination already exists', 409);
     }
@@ -220,37 +218,32 @@ async function updateLocations(client: PoolClient, item: Item, kind: 'legacy' | 
     [kind, kind === 'legacy' ? item.legacy_path : item.managed_path, item.project_id]);
 }
 
-export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, auth: ReturnType<typeof createAuth>, options: CatalogOptions) {
-  async function operation(reply: FastifyReply, work: (client: PoolClient) => Promise<unknown>) {
+export { roots as migrationStorageIdentity, checkedRoots as validateMigrationStorage };
+export type { RootIdentities };
+export class MigrationStorageError extends IntakeError {}
+export class MigrationBusyError extends IntakeError {}
+
+export function createLibraryMigrationService(pool: Pool, options: CatalogOptions) {
+  async function operation<T>(work: (client: PoolClient) => Promise<T>) {
     const client = await pool.connect();
     let locked = false;
     try {
       locked = (await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [libraryMutationLock])).rows[0].locked;
-      if (!locked || options.indexer.getStatus().running) throw new IntakeError('A scan, publication, or migration is running; retry after it finishes', 409);
+      if (!locked || options.indexer.getStatus().running) throw new MigrationBusyError('A scan, publication, or migration is running; retry after it finishes', 409);
       return await work(client);
-    } catch (error) {
-      server.log.error({ err: error }, 'Library migration operation failed');
-      return reply.code(error instanceof IntakeError ? error.status : 500).send({
-        error: error instanceof IntakeError ? error.message : `Migration stopped: ${errorMessage(error)}. The journal is retained; refresh before retrying.`,
-      });
     } finally {
       try { if (locked) await client.query('SELECT pg_advisory_unlock($1)', [libraryMutationLock]); }
       finally { client.release(); }
     }
   }
-  server.post<{ Params: { id: string }; Body: { expectedFingerprint: string; confirmRetainedCopies: boolean; acknowledgeWarnings: boolean } }>(
-    '/library/reorganization-plans/:id/migrate', {
-      preHandler: auth.operatorOnly, schema: { params: jobParams, body: {
-        type: 'object', additionalProperties: false, required: ['expectedFingerprint', 'confirmRetainedCopies', 'acknowledgeWarnings'],
-        properties: { expectedFingerprint: { type: 'string', pattern: '^[a-f0-9]{64}$' },
-          confirmRetainedCopies: { const: true }, acknowledgeWarnings: { const: true } },
-      } },
-    }, async (request, reply) => operation(reply, async (client) => {
-      const previous = await libraryMigrationForPlan(client, request.params.id);
+  return {
+    get: async (id: string) => publicJob(pool, await jobRow(pool, id)),
+    approve: (planId: string, expectedFingerprint: string, actorId: string) => operation(async (client) => {
+      const previous = await libraryMigrationForPlan(client, planId);
       if (previous) return previous;
-      const plan = (await client.query<{ snapshot: LibraryReorganizationPlan }>('SELECT snapshot FROM library_reorganization_plans WHERE id=$1', [request.params.id])).rows[0]?.snapshot;
+      const plan = (await client.query<{ snapshot: LibraryReorganizationPlan }>('SELECT snapshot FROM library_reorganization_plans WHERE id=$1', [planId])).rows[0]?.snapshot;
       if (!plan) throw new IntakeError('Dry run not found', 404);
-      if (plan.fingerprint !== request.body.expectedFingerprint || plan.issues.some((entry) => entry.severity === 'blocker') ||
+      if (plan.fingerprint !== expectedFingerprint || plan.issues.some((entry) => entry.severity === 'blocker') ||
         !plan.projects.length || plan.projects.length > libraryPreviewLimits.projects ||
         plan.projects.some((project) => project.storageKind !== 'legacy' || !project.inspectionComplete || !project.files.length ||
           project.checkedFiles !== project.fileCount || project.issues.some((entry) => entry.severity === 'blocker'))) {
@@ -281,8 +274,8 @@ export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, a
       const id = randomUUID();
       await transaction(client, async () => {
         await client.query(`INSERT INTO library_migrations (id,plan_id,created_by,legacy_root,managed_root,root_identities,history)
-          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [id, plan.id, auth.currentUser(request).id, resolve(options.root), resolve(options.managedRoot!),
-          JSON.stringify(rootIdentities), JSON.stringify([{ actorId: auth.currentUser(request).id, action: 'approved', at: new Date().toISOString() }])]);
+          VALUES ($1,$2,$3,$4,$5,$6,$7)`, [id, plan.id, actorId, resolve(options.root), resolve(options.managedRoot!),
+          JSON.stringify(rootIdentities), JSON.stringify([{ actorId, action: 'approved', at: new Date().toISOString() }])]);
         for (const [index, row] of current.rows.entries()) {
           const project = plan.projects.find((entry) => entry.id === row.id)!;
           const snapshot: Snapshot = { project, files: current.files[index], fingerprint: digest([row, current.files[index]]) };
@@ -291,28 +284,15 @@ export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, a
         }
       });
       return publicJob(client, await jobRow(client, id));
-    }));
-
-  server.get<{ Params: { id: string } }>('/library/migrations/:id', { preHandler: auth.operatorOnly, schema: { params: jobParams } },
-    async (request, reply) => {
-      try { return await publicJob(pool, await jobRow(pool, request.params.id)); }
-      catch (error) { if (error instanceof IntakeError) return reply.code(error.status).send({ error: error.message }); throw error; }
-    });
-
-  server.post<{ Params: { id: string; projectId: string }; Body: { expectedRevision: number; action: 'copy' | 'activate' | 'restore' } }>(
-    '/library/migrations/:id/projects/:projectId', {
-      preHandler: auth.operatorOnly, schema: { params: {
-        ...jobParams, required: ['id', 'projectId'], properties: { ...jobParams.properties, projectId: { type: 'string', pattern: projectIdPattern } },
-      }, body: { ...revisionBody, required: ['expectedRevision', 'action'], properties: { ...revisionBody.properties, action: { enum: ['copy', 'activate', 'restore'] } } } },
-    }, async (request, reply) => operation(reply, async (client) => {
-      if (!isProjectId(request.params.projectId)) throw new IntakeError('Project not found', 404);
-      const job = await jobRow(client, request.params.id);
-      const item = (await items(client, job.id)).find((entry) => entry.project_id === request.params.projectId);
+    }),
+    action: (id: string, projectId: string, action: 'copy' | 'activate' | 'restore', expectedRevision: number, actorId: string) => operation(async (client) => {
+      if (!isProjectId(projectId)) throw new IntakeError('Project not found', 404);
+      const job = await jobRow(client, id);
+      const item = (await items(client, job.id)).find((entry) => entry.project_id === projectId);
       if (!item) throw new IntakeError('Project is not part of this migration', 404);
-      const { action } = request.body;
       if ((action === 'copy' && ['copied', 'activated'].includes(item.status)) ||
         (action === 'activate' && item.status === 'activated') || (action === 'restore' && item.status === 'restored')) return publicJob(client, job);
-      if (job.revision !== request.body.expectedRevision) throw new IntakeError('Migration changed; refresh before continuing', 409);
+      if (job.revision !== expectedRevision) throw new IntakeError('Migration changed; refresh before continuing', 409);
       if (job.status === 'canceled' && action !== 'restore') throw new IntakeError('This migration was canceled', 409);
       try {
         await checkedRoots(job, options);
@@ -329,10 +309,10 @@ export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, a
           const disk = await statfs(parent, { bigint: true });
           const required = item.snapshot.project.files.reduce((total, file) => total + BigInt(file.sizeBytes), 0n) +
             BigInt(manifestBytes.length) + BigInt(item.snapshot.project.files.length + item.snapshot.project.directories.length + 2) * disk.bsize;
-          if (disk.bavail * disk.bsize <= required) throw new IntakeError('Insufficient reported destination space for files, manifest, and staging overhead', 409);
+          if (disk.bavail * disk.bsize <= required) throw new MigrationStorageError('Insufficient reported destination space for files, manifest, and staging overhead', 409);
           await transaction(client, async () => {
             await client.query("UPDATE library_migration_projects SET status='copying',last_error=NULL WHERE id=$1", [item.id]);
-            await audit(client, job, auth.currentUser(request).id, 'copy_started', item.project_id);
+            await audit(client, job, actorId, 'copy_started', item.project_id);
           });
           const stage = stagePath(item);
           if (await exists(job.managed_root, stage)) {
@@ -361,7 +341,7 @@ export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, a
           await syncDirectory(parent);
           await transaction(client, async () => {
             await client.query("UPDATE library_migration_projects SET status='copied',last_error=NULL WHERE id=$1", [item.id]);
-            await audit(client, job, auth.currentUser(request).id, 'copy_verified', item.project_id);
+            await audit(client, job, actorId, 'copy_verified', item.project_id);
           });
         } else if (action === 'activate') {
           if (item.status !== 'copied') throw new IntakeError('Copy and verify this project before activating it', 409);
@@ -384,7 +364,7 @@ export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, a
             await originalCatalog(client, item);
             await updateLocations(client, item, 'managed', stats);
             await client.query("UPDATE library_migration_projects SET status='activated',last_error=NULL WHERE id=$1", [item.id]);
-            await audit(client, job, auth.currentUser(request).id, 'activated', item.project_id);
+            await audit(client, job, actorId, 'activated', item.project_id);
           });
         } else {
           if (item.status !== 'activated') throw new IntakeError('Only an activated project can be restored', 409);
@@ -405,25 +385,22 @@ export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, a
             }
             await updateLocations(client, item, 'legacy', stats);
             await client.query("UPDATE library_migration_projects SET status='restored',last_error=NULL WHERE id=$1", [item.id]);
-            await audit(client, job, auth.currentUser(request).id, 'restored', item.project_id);
+            await audit(client, job, actorId, 'restored', item.project_id);
           });
         }
       } catch (error) {
         await transaction(client, async () => {
           await client.query('UPDATE library_migration_projects SET last_error=$2 WHERE id=$1', [item.id, errorMessage(error)]);
-          await audit(client, job, auth.currentUser(request).id, `${action}_failed`, item.project_id);
+          await audit(client, job, actorId, `${action}_failed`, item.project_id);
         });
         throw error;
       }
       return publicJob(client, await jobRow(client, job.id));
-    }));
-
-  server.post<{ Params: { id: string }; Body: { expectedRevision: number } }>('/library/migrations/:id/cancel', {
-    preHandler: auth.operatorOnly, schema: { params: jobParams, body: revisionBody },
-  }, async (request, reply) => operation(reply, async (client) => {
-    const job = await jobRow(client, request.params.id);
+    }),
+    cancel: (id: string, expectedRevision: number, actorId: string) => operation(async (client) => {
+    const job = await jobRow(client, id);
     if (job.status === 'canceled') return publicJob(client, job);
-    if (job.revision !== request.body.expectedRevision) throw new IntakeError('Migration changed; refresh before canceling', 409);
+    if (job.revision !== expectedRevision) throw new IntakeError('Migration changed; refresh before canceling', 409);
     await checkedRoots(job, options);
     for (const item of await items(client, job.id)) if (['pending', 'copying', 'copied'].includes(item.status)) {
       const current = (await client.query<{ storage_kind: string; relative_path: string }>(
@@ -444,8 +421,39 @@ export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, a
     await transaction(client, async () => {
       await client.query("UPDATE library_migration_projects SET status='canceled',last_error=NULL WHERE migration_id=$1 AND status IN ('pending','copying','copied')", [job.id]);
       await client.query("UPDATE library_migrations SET status='canceled' WHERE id=$1", [job.id]);
-      await audit(client, job, auth.currentUser(request).id, 'canceled');
+      await audit(client, job, actorId, 'canceled');
     });
     return publicJob(client, await jobRow(client, job.id));
-  }));
+    }),
+  };
+}
+
+export function registerLibraryMigrations(server: FastifyInstance, pool: Pool, auth: ReturnType<typeof createAuth>, options: CatalogOptions) {
+  const service = createLibraryMigrationService(pool, options);
+  async function respond(reply: FastifyReply, work: () => Promise<LibraryMigrationJob>) {
+    try { return await work(); }
+    catch (error) {
+      server.log.error({ err: error }, 'Library migration operation failed');
+      return reply.code(error instanceof IntakeError ? error.status : 500).send({
+        error: error instanceof IntakeError ? error.message : `Migration stopped: ${errorMessage(error)}. The journal is retained; refresh before retrying.`,
+      });
+    }
+  }
+  server.post<{ Params: { id: string }; Body: { expectedFingerprint: string } }>('/library/reorganization-plans/:id/migrate', {
+    preHandler: auth.operatorOnly, schema: { params: jobParams, body: {
+      type: 'object', additionalProperties: false, required: ['expectedFingerprint', 'confirmRetainedCopies', 'acknowledgeWarnings'],
+      properties: { expectedFingerprint: { type: 'string', pattern: '^[a-f0-9]{64}$' }, confirmRetainedCopies: { const: true }, acknowledgeWarnings: { const: true } },
+    } },
+  }, (request, reply) => respond(reply, () => service.approve(request.params.id, request.body.expectedFingerprint, auth.currentUser(request).id)));
+  server.get<{ Params: { id: string } }>('/library/migrations/:id', { preHandler: auth.operatorOnly, schema: { params: jobParams } },
+    (request, reply) => respond(reply, () => service.get(request.params.id)));
+  server.post<{ Params: { id: string; projectId: string }; Body: { expectedRevision: number; action: 'copy' | 'activate' | 'restore' } }>(
+    '/library/migrations/:id/projects/:projectId', {
+      preHandler: auth.operatorOnly, schema: { params: {
+        ...jobParams, required: ['id', 'projectId'], properties: { ...jobParams.properties, projectId: { type: 'string', pattern: projectIdPattern } },
+      }, body: { ...revisionBody, required: ['expectedRevision', 'action'], properties: { ...revisionBody.properties, action: { enum: ['copy', 'activate', 'restore'] } } } },
+    }, (request, reply) => respond(reply, () => service.action(request.params.id, request.params.projectId, request.body.action, request.body.expectedRevision, auth.currentUser(request).id)));
+  server.post<{ Params: { id: string }; Body: { expectedRevision: number } }>('/library/migrations/:id/cancel', {
+    preHandler: auth.operatorOnly, schema: { params: jobParams, body: revisionBody },
+  }, (request, reply) => respond(reply, () => service.cancel(request.params.id, request.body.expectedRevision, auth.currentUser(request).id)));
 }

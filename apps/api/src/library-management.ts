@@ -182,16 +182,26 @@ export function registerLibraryManagement(
       },
     } },
   }, async (request, reply) => {
-    if (request.body.projectIds.some((id) => !isProjectId(id))) return reply.code(400).send({ error: 'Invalid project ID' });
-    if (options.indexer.getStatus().running) return reply.code(409).send({ error: 'Wait for the library scan to finish before generating a dry run' });
+    try { return await createLibraryPreview(pool, options, request.body.projectIds, auth.currentUser(request).id); }
+    catch (error) {
+      server.log.error({ err: error }, 'Library reorganization preview failed');
+      return reply.code(error instanceof IntakeError ? error.status : 500).send({
+        error: error instanceof IntakeError ? error.message : 'Could not save the dry run. No files were changed; check the server log and retry.',
+      });
+    }
+  });
+}
+
+export async function createLibraryPreview(pool: Pool, options: CatalogOptions, projectIds: string[], actorId: string, scalableDestination = false) {
+    if (!projectIds.length || projectIds.length > libraryPreviewLimits.projects || new Set(projectIds).size !== projectIds.length || projectIds.some((id) => !isProjectId(id))) {
+      throw new IntakeError('Invalid project selection', 400);
+    }
+    if (options.indexer.getStatus().running) throw new IntakeError('Wait for the library scan to finish before generating a dry run', 409);
     const client = await pool.connect();
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
-      const rows = (await client.query<LibraryProjectRow>(`${libraryProjectSelect} WHERE p.id=ANY($1::bigint[]) ORDER BY p.id`, [request.body.projectIds])).rows;
-      if (rows.length !== request.body.projectIds.length) {
-        await client.query('ROLLBACK');
-        return reply.code(404).send({ error: 'One or more selected projects no longer exist' });
-      }
+      const rows = (await client.query<LibraryProjectRow>(`${libraryProjectSelect} WHERE p.id=ANY($1::bigint[]) ORDER BY p.id`, [projectIds])).rows;
+      if (rows.length !== projectIds.length) throw new IntakeError('One or more selected projects no longer exist', 404);
       const plan: LibraryReorganizationPlan = {
         id: randomUUID(), createdAt: new Date().toISOString(), kind: 'dry_run', fingerprint: '',
         projects: [], additionalBytes: '0', availableBytes: null, issues: [],
@@ -217,6 +227,7 @@ export function registerLibraryManagement(
       } catch (error) { issue(plan.issues, 'managed_unavailable', `Managed storage is unavailable: ${message(error)}`); managedRoot = undefined; }
       const budget = { entries: 0 };
       const occupied = new Set<string>();
+      const wantedDestinations = new Set(rows.map((row) => pathKey(`${row.id}-${projectSlug(row.name)}`)));
       if (managedRoot) try {
         const parent = join(managedRoot, 'projects');
         try {
@@ -227,11 +238,12 @@ export function registerLibraryManagement(
           plan.availableBytes = String(disk.bavail * disk.bsize);
           const directory = await opendir(parent);
           for await (const entry of directory) {
-            if (++budget.entries > libraryPreviewLimits.entries) {
+            if (!scalableDestination && ++budget.entries > libraryPreviewLimits.entries) {
               issue(plan.issues, 'entry_limit', 'Managed directory exceeds the 2,000-entry batch inspection limit. Destination checks are incomplete.');
               break;
             }
-            occupied.add(pathKey(entry.name));
+            const key = pathKey(entry.name);
+            if (!scalableDestination || wantedDestinations.has(key)) occupied.add(key);
           }
         } catch (error) {
           if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
@@ -298,15 +310,11 @@ export function registerLibraryManagement(
       const snapshot = JSON.stringify(plan);
       if (Buffer.byteLength(snapshot) > libraryPreviewLimits.bytes) throw new IntakeError('Dry run exceeds 8 MiB; select a smaller batch', 413);
       await client.query('INSERT INTO library_reorganization_plans (id,created_by,snapshot,created_at) VALUES ($1,$2,$3,$4)',
-        [plan.id, auth.currentUser(request).id, snapshot, plan.createdAt]);
+        [plan.id, actorId, snapshot, plan.createdAt]);
       await client.query('COMMIT');
       return plan;
     } catch (error) {
       await client.query('ROLLBACK');
-      server.log.error({ err: error }, 'Library reorganization preview failed');
-      return reply.code(error instanceof IntakeError ? error.status : 500).send({
-        error: error instanceof IntakeError ? error.message : 'Could not save the dry run. No files were changed; check the server log and retry.',
-      });
+      throw error;
     } finally { client.release(); }
-  });
 }

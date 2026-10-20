@@ -6,6 +6,7 @@ import { buildServer } from './server.js';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { validateStorage } from './import-storage.js';
+import { createLibraryAdoptionRunner } from './library-adoption.js';
 
 const pool = createPool(process.env.DATABASE_URL ?? '');
 const root = process.env.LIBRARY_ROOT;
@@ -51,6 +52,7 @@ const server = buildServer(pool, {
   managedRoot, managedClientMountPrefix: process.env.MANAGED_CLIENT_MOUNT_PREFIX,
   importStorage,
 }, publicOrigin);
+const adoption = createLibraryAdoptionRunner(pool, { pool, root, managedRoot, indexer }, server.log);
 const port = Number(process.env.API_PORT ?? 3000);
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('API_PORT must be a valid TCP port');
@@ -61,6 +63,7 @@ const close = async () => {
   if (closing) return closing;
   closing = (async () => {
   scheduler.stop();
+  await adoption.stop();
   await server.close();
   await pool.end();
   })();
@@ -77,6 +80,7 @@ process.once('SIGINT', shutdown);
 
 try {
   await server.listen({ host: '0.0.0.0', port });
+  adoption.start();
   void indexer.rescan().catch((error: unknown) => server.log.error({ err: error }, 'Initial library scan failed'));
 } catch (error) {
   server.log.error(error);

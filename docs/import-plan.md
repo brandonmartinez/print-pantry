@@ -22,6 +22,13 @@ and verified restoration. Durable journals preserve existing identities, request
 references, and both copies; legacy scans exclude activated originals. No
 existing library is migrated automatically.
 
+The next implementation checkpoint adds a durable bulk-adoption runner using
+the same preview/migration services. It freezes existing catalog membership,
+plans projects incrementally, and supports separate batch-level copy and
+activation approvals, explicit partial results, pause/resume, cancellation and
+restoration. Initialization and CLI controls will use this backend rather than
+independent file-moving scripts.
+
 ## Recommendation
 
 Treat library management and the print queue as primary product capabilities.

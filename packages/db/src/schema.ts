@@ -128,6 +128,50 @@ export const libraryMigrationProjects = pgTable('library_migration_projects', {
   check('library_migration_projects_status_check', sql`${table.status} IN ('pending','copying','copied','activated','restored','canceled')`),
 ]);
 
+export const libraryAdoptionRuns = pgTable('library_adoption_runs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  createdBy: uuid('created_by').notNull().references(() => users.id),
+  actorId: uuid('actor_id').notNull().references(() => users.id),
+  state: text('state').notNull().default('planning'),
+  resumeState: text('resume_state'),
+  revision: integer('revision').notNull().default(0),
+  legacyRoot: text('legacy_root').notNull(),
+  managedRoot: text('managed_root').notNull(),
+  rootIdentities: jsonb('root_identities').notNull(),
+  fingerprint: text('fingerprint').notNull().default(''),
+  availableBytes: text('available_bytes'),
+  copyApprovedAt: timestamp('copy_approved_at', { withTimezone: true }),
+  activationApprovedAt: timestamp('activation_approved_at', { withTimezone: true }),
+  history: jsonb('history').notNull().default([]),
+  lastError: text('last_error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('library_adoption_updated_idx').on(table.updatedAt),
+  uniqueIndex('library_adoption_active_roots_idx').on(table.legacyRoot, table.managedRoot)
+    .where(sql`${table.state} NOT IN ('completed','partial','canceled','restored')`),
+  check('library_adoption_state_check', sql`${table.state} IN ('planning','review','copying','awaiting_activation','activating','restoring','canceling','paused','completed','partial','canceled','restored')`),
+]);
+
+export const libraryAdoptionItems = pgTable('library_adoption_items', {
+  runId: uuid('run_id').notNull().references(() => libraryAdoptionRuns.id),
+  projectId: projectIdType('project_id').notNull().references(() => projects.id),
+  name: text('name').notNull(),
+  status: text('status').notNull().default('pending'),
+  planId: uuid('plan_id').references(() => libraryReorganizationPlans.id),
+  migrationId: uuid('migration_id').references(() => libraryMigrations.id),
+  fingerprint: text('fingerprint'),
+  sizeBytes: text('size_bytes').notNull(),
+  fileCount: integer('file_count').notNull(),
+  issues: jsonb('issues').notNull().default([]),
+  failedAction: text('failed_action'),
+  lastError: text('last_error'),
+}, (table) => [
+  uniqueIndex('library_adoption_item_idx').on(table.runId, table.projectId),
+  index('library_adoption_work_idx').on(table.runId, table.status, table.projectId),
+  check('library_adoption_item_status_check', sql`${table.status} IN ('pending','ready','blocked','copying','copied','activated','failed','restored','canceled')`),
+]);
+
 export const importUploads = pgTable('import_uploads', {
   id: uuid('id').primaryKey(),
   requestId: uuid('request_id').notNull().references(() => importIntakes.requestId),

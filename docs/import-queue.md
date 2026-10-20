@@ -418,6 +418,58 @@ All migration routes are operator-only:
 
 ## Subsequent checkpoints
 
+### Bulk-adoption engine checkpoint
+
+The shared backend now supports library-wide initialization/adoption without
+manually selecting 25-project batches. Index the existing library first: the
+run freezes all currently registered legacy project IDs. Planning creates
+individual, immutable previews in bounded work units; it does not copy files.
+The initialization UI and CLI will use this same service and durable runner.
+
+Runs require separate **copy/verify approval** and **batch activation approval**.
+The runner continues eligible projects after independently blocked/failed
+projects and explicitly reports partial results. Disk/root/database failures
+pause the run instead. Pause/cancel takes effect between project operations;
+closing a browser or restarting the API does not discard work. Existing
+copy/verification, journal recovery, identity preservation, cancellation, and
+restoration logic is shared with the per-project endpoints, not reimplemented.
+
+Legacy scans are deferred while a bulk run is active or awaiting review so
+routine scan timestamps cannot invalidate its reviewed evidence. New legacy
+projects added after membership freezes are not silently included. Changed
+files/metadata still fail verification and require a new reviewed plan.
+
+The library can exceed 25 projects or 1,000 total files; each individual project
+still has the documented 1,000-file, 2,000-source-entry, 12-component and 8 MiB
+preview limits. Oversized/ambiguous projects are explicitly blocked, not
+silently truncated. Bulk destination checks stream directory entries without
+imposing the small manual preview's aggregate managed-directory limit.
+Source discovery/approval is not automatic; existing approved sources and
+original shortcut files are preserved.
+
+Operator API:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/library/adoptions` | Save membership with a UUID `requestKey`; repeated submissions reopen that run |
+| `GET /api/library/adoptions` | List the latest 20 runs |
+| `GET /api/library/adoptions/:id` | State, revision, fingerprint, totals, counts, storage roots and errors |
+| `GET /api/library/adoptions/:id/items?after=&status=` | Keyset-paginated project outcomes, 50 at a time, optionally status-filtered |
+| `POST /api/library/adoptions/:id/commands` | Revision-protected approval, pause/resume, retry, cancel and restore |
+
+Commands use `action` and `expectedRevision`. `approve_copy` also requires the
+reviewed `expectedFingerprint`, `confirmRetainedCopies: true` and
+`acknowledgeWarnings: true`; `activate` requires that fingerprint and
+`confirmActivation: true`. Cancellation/restoration require
+`confirmCancellation: true` / `confirmRestoration: true`. `retry` specifies
+`stage: copy|activate|restore|cancel` and never updates approved evidence.
+Storage roots are configured on the server, not supplied by the utility.
+
+The runner starts with the API and is claimed through a separate PostgreSQL
+advisory lock; only one server executes bulk work at a time. Actual filesystem
+operations still take the existing shared scan/publication/migration lock.
+Back up both new adoption tables together with migration journals and files.
+
 1. Bulk source discovery and periodic managed-root reconciliation.
 2. Optional OpenAI-assisted suggestions with explicit privacy/budget controls;
    deterministic organization continues to work without a provider.

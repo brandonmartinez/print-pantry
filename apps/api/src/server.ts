@@ -9,6 +9,7 @@ import type { ImportStorage } from './import-storage.js';
 import { registerSourceDiscovery } from './source-discovery.js';
 import { registerLibraryManagement } from './library-management.js';
 import { libraryMigrationForPlan, registerLibraryMigrations } from './library-migrations.js';
+import { registerLibraryAdoption } from './library-adoption.js';
 
 export function buildServer(
   pool: { query(sql: string): Promise<unknown> },
@@ -49,6 +50,7 @@ export function buildServer(
     registerSourceDiscovery(server, catalog.pool, auth, catalog);
     registerLibraryManagement(server, catalog.pool, auth, catalog, (id) => libraryMigrationForPlan(catalog.pool, id));
     registerLibraryMigrations(server, catalog.pool, auth, catalog);
+    registerLibraryAdoption(server, catalog.pool, auth, catalog);
   }
 
   return server;
