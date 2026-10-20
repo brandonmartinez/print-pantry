@@ -73,7 +73,9 @@ async function transaction<T>(pool: Pool, work: (client: PoolClient) => Promise<
   } finally { client.release(); }
 }
 async function setItem(client: Connection, run: Run, item: Item, status: LibraryAdoptionItemStatus, error: string | null = null, failedAction: string | null = null) {
-  await transactionUpdate(client, run.id, `UPDATE library_adoption_items SET status=$3,last_error=$4,failed_action=$5
+  await transactionUpdate(client, run.id, `UPDATE library_adoption_items SET status=$3,last_error=$4,failed_action=$5,
+    activation_approved_at=CASE WHEN $3='copying' THEN NULL ELSE activation_approved_at END,
+    restoration_approved_at=CASE WHEN $3 IN ('copying','activated') THEN NULL ELSE restoration_approved_at END
     WHERE run_id=$1 AND project_id=$2`, [run.id, item.project_id, status, error, failedAction]);
 }
 async function transactionUpdate(client: Connection, id: string, sql: string, values: unknown[]) {
@@ -153,6 +155,7 @@ export function createLibraryAdoptionService(pool: Pool, options: CatalogOptions
         if (run.state !== 'awaiting_activation' || !current.counts.copied || body.expectedFingerprint !== run.fingerprint ||
           body.confirmActivation !== true || !run.copy_approved_at) throw new IntakeError('Review verified copies and explicitly approve batch activation', 409);
         next = 'activating';
+        await client.query("UPDATE library_adoption_items SET activation_approved_at=clock_timestamp() WHERE run_id=$1 AND status='copied'", [id]);
         await client.query('UPDATE library_adoption_runs SET activation_approved_at=clock_timestamp() WHERE id=$1', [id]);
       } else if (body.action === 'pause') {
         if (!workingStates.includes(run.state)) throw new IntakeError('Only running adoption work can be paused', 409);
@@ -168,6 +171,7 @@ export function createLibraryAdoptionService(pool: Pool, options: CatalogOptions
           throw new IntakeError('Confirm restoration of activated projects in a stopped run', 409);
         }
         next = 'restoring';
+        await client.query("UPDATE library_adoption_items SET restoration_approved_at=clock_timestamp() WHERE run_id=$1 AND status='activated'", [id]);
       } else {
         const stage = body.stage;
         if (!stage || !['partial', 'awaiting_activation', 'paused'].includes(run.state)) throw new IntakeError('Choose a failed stage in a stopped run to retry', 409);
@@ -192,8 +196,8 @@ export function createLibraryAdoptionRunner(pool: Pool, options: CatalogOptions,
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active: Promise<void> | undefined;
   async function step(client: PoolClient) {
-    const run = (await client.query<Run>(`SELECT * FROM library_adoption_runs WHERE legacy_root=$1 AND managed_root=$2
-      AND state=ANY($3::text[]) ORDER BY created_at,id LIMIT 1`, [resolve(options.root), options.managedRoot ? resolve(options.managedRoot) : '', workingStates])).rows[0];
+    const run = (await client.query<Run>(`SELECT * FROM library_adoption_runs WHERE state=ANY($1::text[])
+      ORDER BY created_at,id LIMIT 1`, [workingStates])).rows[0];
     if (!run || options.indexer.getStatus().running) return false;
     let currentItem: Item | undefined;
     try {
@@ -203,13 +207,16 @@ export function createLibraryAdoptionRunner(pool: Pool, options: CatalogOptions,
         run.state === 'activating' ? ['copied'] : run.state === 'restoring' ? ['activated'] : ['pending', 'ready', 'copying', 'copied', 'failed'];
       const item = (await client.query<Item>(`SELECT * FROM library_adoption_items WHERE run_id=$1 AND status=ANY($2::text[])
         AND NOT (status='failed' AND failed_action='cancel')
-        ORDER BY project_id LIMIT 1`, [run.id, statuses])).rows[0];
+        AND ($3<>'activating' OR activation_approved_at IS NOT NULL)
+        AND ($3<>'restoring' OR restoration_approved_at IS NOT NULL)
+        ORDER BY project_id LIMIT 1`, [run.id, statuses, run.state])).rows[0];
       currentItem = item;
       if (!item) {
         const current = await publicRun(client, run);
         const partial = current.counts.failed + current.counts.blocked + current.counts.canceled > 0;
         const next = run.state === 'planning' ? 'review' : run.state === 'copying' ? (current.counts.copied ? 'awaiting_activation' : 'partial') :
-          run.state === 'activating' ? (partial ? 'partial' : 'completed') : run.state === 'restoring' ? (partial ? 'partial' : 'restored') :
+          run.state === 'activating' ? (current.counts.copied ? 'awaiting_activation' : partial ? 'partial' : 'completed') :
+          run.state === 'restoring' ? (partial || current.counts.activated ? 'partial' : 'restored') :
           current.counts.failed ? 'partial' : 'canceled';
         const hash = run.state === 'planning' ? await fingerprint(client, run.id) : run.fingerprint;
         await client.query(`UPDATE library_adoption_runs SET state=$3,fingerprint=$4,revision=revision+1,updated_at=clock_timestamp()

@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "test": "npm run test --workspaces --if-present",
     "test:browser": "playwright test tests/browser --workers=1",
+    "library": "npm run library --workspace @print-pantry/api --",
     "db:migrate": "npm run db:migrate --workspace @print-pantry/db",
     "db:generate": "npm run db:generate --workspace @print-pantry/db"
   },

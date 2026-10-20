@@ -165,8 +165,8 @@ export function createLibraryIndexer({ db, root, ignoredDirectoryNames = default
         const claim = await coordinator.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [libraryMutationLock]);
         locked = claim.rows[0].locked;
         if (!locked) throw new ScanInProgressError();
-        const adoption = await coordinator.query(`SELECT id FROM library_adoption_runs WHERE legacy_root=$1
-          AND state NOT IN ('completed','partial','canceled','restored') LIMIT 1`, [libraryRoot]);
+        const adoption = await coordinator.query(`SELECT id FROM library_adoption_runs
+          WHERE state NOT IN ('completed','partial','canceled','restored') LIMIT 1`);
         if (adoption.rowCount) throw new ScanInProgressError();
         return await scanLibrary();
       } finally {

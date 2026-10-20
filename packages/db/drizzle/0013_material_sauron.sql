@@ -1,0 +1,2 @@
+ALTER TABLE "library_adoption_items" ADD COLUMN "activation_approved_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "library_adoption_items" ADD COLUMN "restoration_approved_at" timestamp with time zone;

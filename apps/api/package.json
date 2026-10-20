@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run src --no-file-parallelism",
     "account:create": "node dist/provision.js",
+    "library": "node dist/library-cli.js",
     "account:seed-dev": "tsx src/seed-dev.ts"
   },
   "dependencies": {

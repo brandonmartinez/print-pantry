@@ -6,8 +6,9 @@ Implemented checkpoints include bigint project IDs, the household/operator URL
 submission queue, manual file/ZIP intake, deterministic organization, editable
 review, retained originals, and recoverable managed publication. See
 [the checkpoint guide](import-queue.md) for testing, limits, and recovery.
-Operations are request-driven with persisted states and database locks, not
-background workers. Publication verifies its complete inventory; periodic
+Manual intake/publication operations are request-driven with persisted states
+and database locks. Bulk adoption uses a durable API-side background runner.
+Publication verifies its complete inventory; periodic
 managed-root drift reconciliation is not implemented yet. Legacy shortcut
 source recovery now supports per-project, operator-run discovery previews and
 approved source-association backfill, including XML/binary macOS shortcuts.
@@ -22,12 +23,13 @@ and verified restoration. Durable journals preserve existing identities, request
 references, and both copies; legacy scans exclude activated originals. No
 existing library is migrated automatically.
 
-The next implementation checkpoint adds a durable bulk-adoption runner using
+The bulk-adoption checkpoint adds a durable runner using
 the same preview/migration services. It freezes existing catalog membership,
 plans projects incrementally, and supports separate batch-level copy and
 activation approvals, explicit partial results, pause/resume, cancellation and
-restoration. Initialization and CLI controls will use this backend rather than
-independent file-moving scripts.
+restoration. Initialization and CLI controls now use this backend rather than
+independent file-moving scripts. Both require an existing catalog scan and
+configured permanent storage; neither automatically adopts a real library.
 
 ## Recommendation
 

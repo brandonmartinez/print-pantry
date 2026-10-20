@@ -269,8 +269,11 @@ Retained originals have no automatic purge; agree a retention policy and
 independent backup before any future cleanup feature is enabled. See
 [the manual-import guide](import-queue.md) for limits and operator testing.
 
-Library adoption uses separately approved, request-driven copy/verify/activate
-jobs with durable database journals. Keep `LIBRARY_ROOT` read-only and retain
+Per-project library adoption uses separately approved copy/verify/activate
+requests with durable database journals. Bulk initialization uses the same
+services through a persistent API-side runner and requires separate batch copy
+and activation approvals. The CLI authenticates against that API; it does not
+run an independent filesystem migration. Keep `LIBRARY_ROOT` read-only and retain
 its original files: neither activation nor restoration requires source write
 access. Scans and publication share an exclusive database lock with migration.
 After a timeout/restart, reopen the saved plan and refresh progress before
@@ -281,7 +284,10 @@ restored managed directories, without reviewing the journal and backup coverage.
 There is no purge or periodic drift reconciler. Verify real-library backups
 before adoption and exercise the
 [synthetic adoption/restore checkpoint](import-queue.md#library-adoption-copy-verify-activate-and-restore)
-first.
+first. See the [bulk workflow and CLI guide](import-queue.md#bulk-library-initialization-and-cli)
+for run recovery, partial-result exit codes, password handling, and storage
+configuration. Legacy scans are deferred during active/reviewable bulk runs;
+cancel abandoned runs rather than leaving them awaiting approval indefinitely.
 
 Refuse a restore target unless it is positively identified as the disposable
 verification instance. Do not automate broad deletes, volume removal, or a

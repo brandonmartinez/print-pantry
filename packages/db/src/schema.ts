@@ -166,6 +166,8 @@ export const libraryAdoptionItems = pgTable('library_adoption_items', {
   issues: jsonb('issues').notNull().default([]),
   failedAction: text('failed_action'),
   lastError: text('last_error'),
+  activationApprovedAt: timestamp('activation_approved_at', { withTimezone: true }),
+  restorationApprovedAt: timestamp('restoration_approved_at', { withTimezone: true }),
 }, (table) => [
   uniqueIndex('library_adoption_item_idx').on(table.runId, table.projectId),
   index('library_adoption_work_idx').on(table.runId, table.status, table.projectId),

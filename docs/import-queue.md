@@ -366,8 +366,8 @@ adopting real projects. Retaining originals is not a backup.
 
 Each project has its own status and last error. The job uses optimistic revisions
 and a shared database advisory lock with scans and import publication. Concurrent
-storage operations return a conflict instead of running together. Operations are
-synchronous requests, not background workers; large projects may outlast proxy
+storage operations return a conflict instead of running together. Per-project
+controls use synchronous requests; large projects may outlast proxy
 timeouts. Refresh to inspect durable state before retrying. Refreshing or closing
 the browser does not cancel work already running on the server.
 
@@ -416,15 +416,103 @@ All migration routes are operator-only:
 | `POST /api/library/migrations/:id/projects/:projectId` | Explicit `copy`, `activate`, or `restore` with `expectedRevision` |
 | `POST /api/library/migrations/:id/cancel` | Cancel unactivated work with `expectedRevision`; keep both copies |
 
-## Subsequent checkpoints
-
-### Bulk-adoption engine checkpoint
+## Bulk library initialization and CLI
 
 The shared backend now supports library-wide initialization/adoption without
 manually selecting 25-project batches. Index the existing library first: the
 run freezes all currently registered legacy project IDs. Planning creates
 individual, immutable previews in bounded work units; it does not copy files.
-The initialization UI and CLI will use this same service and durable runner.
+The initialization UI and CLI use this same service and durable runner. The API
+must remain running; the utility is not an offline database/filesystem importer.
+
+### First initialization / bulk workflow
+
+1. Configure the final storage **before copying**. The development managed root
+   defaults to `.pantry-data/library` under the mounted checkout, not the legacy
+   mount or automatically the NAS. Production Compose uses a dedicated Docker
+   volume by default. For host/NAS storage, supply separate, persistent bind
+   mounts and matching `IMPORT_STORAGE_ROOT` / `MANAGED_LIBRARY_ROOT` settings.
+   Neither root may be inside the read-only `LIBRARY_ROOT`.
+2. Scan the existing read-only library. Its project boundaries, classifications,
+   and app-generated IDs form the initial catalog; review uncertain boundaries
+   and recover/approve sources where appropriate. This workflow does not guess
+   new boundaries or automatically approve discovered URLs.
+3. Open **Manage library → Initialize or adopt an existing library → Plan
+   existing library**. No manual 25-project selection is required.
+4. Review the source and destination boxes, space estimate, totals, blocked/failed
+   filters, and saved per-project previews. The run URL is bookmarkable as
+   `/manage-library?adoption=<id>`; recent runs can be reopened after reload.
+5. Acknowledge verified backups, retention, notes, and projects left behind.
+   Choose **Approve batch copy and verification**. Progress updates automatically.
+6. Wait for **Verified copies await activation approval**. Projects still use
+   legacy files. Check results, then **Review batch activation → Confirm batch
+   activation** once for the verified eligible projects.
+7. Check downloads, previews, metadata and existing requests on a small
+   synthetic library first. A partial result is not a completed migration:
+   resolve/report remaining projects rather than treating them as imported.
+8. Pause/resume and retry a failed stage as needed. Cancellation retains copies
+   and does not undo activated projects. Stopped runs with active projects offer
+   confirmed batch restoration. A restored managed directory still occupies
+   its proposed destination until separately reviewed cleanup.
+
+### Utility
+
+Build with `npm run build`, keep the API running, then inspect:
+
+```bash
+npm run library -- --help
+```
+
+The utility authenticates an existing operator against the API, keeps its
+session in memory, and logs out on completion. Passwords are accepted only from
+piped stdin, never as a command-line argument or saved configuration. Use HTTPS
+except for loopback development. API redirects are refused. The direct API
+default is `http://127.0.0.1:3000`; for the web proxy pass
+`--url https://your-pantry-host/api`.
+
+Example in **Bash**, with an interactively read password rather than a literal
+secret in shell history:
+
+```bash
+read -r -s -p 'Operator password: ' PANTRY_PASSWORD
+printf '\n'
+printf '%s\n' "$PANTRY_PASSWORD" | npm run library -- plan \
+  --username operator --password-stdin --wait
+unset PANTRY_PASSWORD
+```
+
+`plan --wait` stops at plan review. It **never copies or activates**. Inspect the
+returned run ID and fingerprint, then supply the same credential flags/password
+stdin for later commands. These are command shapes; replace the uppercase
+placeholders with reviewed values:
+
+```text
+status RUN_ID
+items RUN_ID --status blocked
+copy RUN_ID --fingerprint PLAN_FINGERPRINT --confirm-retained-copies --acknowledge-warnings --wait
+activate RUN_ID --fingerprint PLAN_FINGERPRINT --confirm-activation --wait
+pause RUN_ID
+resume RUN_ID --wait
+retry RUN_ID --stage copy --wait
+cancel RUN_ID --confirm-cancellation --wait
+restore RUN_ID --confirm-restoration --wait
+```
+
+`items` returns 50 outcomes and a next cursor; use `--cursor PROJECT_ID` to
+continue. IDs and byte totals retain exact decimal strings. For automation use
+`--json` and suppress npm wrapper banners with `npm --silent run library -- ...`,
+or invoke `node apps/api/dist/library-cli.js` directly. `--revision` optionally
+pins the expected run revision; otherwise the utility reads it before submitting
+the command. `--wait` waits only for the current stage and never grants the next
+approval. If a planning request times out, the error includes its request/run
+ID: use `status` or `list` before creating another run.
+
+Exit 0 means a successful request/current stage; exit 1 means invalid arguments,
+API/transport failure, or failed session cleanup. Waiting returns **exit 2** for
+blocked/failed/canceled projects, a partial result, or a pause. Read-only
+`status`/`items` still succeed when reporting problems. Closing the CLI does not
+cancel server work. The same plan can be created in the UI and controlled by the
+utility, or vice versa; refresh before acting in another client.
 
 Runs require separate **copy/verify approval** and **batch activation approval**.
 The runner continues eligible projects after independently blocked/failed
@@ -433,11 +521,17 @@ pause the run instead. Pause/cancel takes effect between project operations;
 closing a browser or restarting the API does not discard work. Existing
 copy/verification, journal recovery, identity preservation, cancellation, and
 restoration logic is shared with the per-project endpoints, not reimplemented.
+Activation and restoration approvals cover only the currently eligible projects.
+Retrying an earlier failed stage does not authorize newly verified copies or
+newly activated projects; those require their own explicit batch approval.
 
 Legacy scans are deferred while a bulk run is active or awaiting review so
 routine scan timestamps cannot invalidate its reviewed evidence. New legacy
 projects added after membership freezes are not silently included. Changed
 files/metadata still fail verification and require a new reviewed plan.
+Changed server storage configuration pauses existing work with an explicit
+error. Finish or cancel the run before changing storage settings; do not move
+approved roots underneath a running or paused adoption.
 
 The library can exceed 25 projects or 1,000 total files; each individual project
 still has the documented 1,000-file, 2,000-source-entry, 12-component and 8 MiB
@@ -469,6 +563,8 @@ The runner starts with the API and is claimed through a separate PostgreSQL
 advisory lock; only one server executes bulk work at a time. Actual filesystem
 operations still take the existing shared scan/publication/migration lock.
 Back up both new adoption tables together with migration journals and files.
+
+## Subsequent checkpoints
 
 1. Bulk source discovery and periodic managed-root reconciliation.
 2. Optional OpenAI-assisted suggestions with explicit privacy/budget controls;

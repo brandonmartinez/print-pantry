@@ -723,6 +723,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .library-migration-projects { list-style: none; padding: 0; }
 .library-migration-projects > li { padding: 1rem 0; border-top: 1px solid var(--line); }
 .library-migration-projects strong { min-width: 0; overflow-wrap: anywhere; }
+.library-adoption-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: .75rem; }
+.library-adoption-counts > div { min-width: 0; padding: .75rem; background: var(--cream); border-radius: 6px; }
+.library-adoption-counts dt { font-size: .78rem; color: var(--muted); }
+.library-adoption-counts dd { margin: .4rem 0 0; font-weight: 600; overflow-wrap: anywhere; }
+.library-adoption-items { list-style: none; padding: 0; }
+.library-adoption-items > li { border-top: 1px solid var(--line); padding: 1rem 0; min-width: 0; overflow-wrap: anywhere; }
+.library-adoption-items details { margin-top: .75rem; font-size: .85rem; line-height: 1.6; }
+.library-adoption .source-candidate-choice + .source-candidate-choice, .library-adoption-history { margin-top: .75rem; }
 .library-management-projects, .library-file-mappings { list-style: none; padding: 0; }
 .library-management-projects > li { border-top: 1px solid var(--line); padding: 1rem 0; }
 .library-storage-path { display: block; overflow-wrap: anywhere; margin: .4rem 0; }

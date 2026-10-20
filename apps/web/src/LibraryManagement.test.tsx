@@ -35,6 +35,7 @@ function setup(options: { initial?: string; data?: LibraryManagementResponse; sa
   let saved = structuredClone(options.saved ?? plan);
   let job = saved.migration ?? structuredClone(initialJob);
   const request = vi.fn(async (path: string, init?: RequestInit) => {
+    if (path === '/api/library/adoptions') return { runs: [] };
     if (path.includes('/migrations/')) {
       if (init?.method === 'POST') {
         if (options.failMigration) {
@@ -75,7 +76,7 @@ it('lists storage kinds without scanning, auto-selecting projects, or permitting
   expect(screen.getByRole('checkbox', { name: 'Select Legacy holder' })).toHaveProperty('checked', false);
   expect(screen.getByRole('checkbox', { name: 'Select Managed tray' })).toHaveProperty('disabled', true);
   expect(screen.getByText(/No files are copied, renamed, deleted, or activated/)).toBeTruthy();
-  expect(request.mock.calls.every(([path, init]) => path.startsWith('/api/library/management?') && !init?.method)).toBe(true);
+  expect(request.mock.calls.every(([path, init]) => (path.startsWith('/api/library/management?') || path === '/api/library/adoptions') && !init?.method)).toBe(true);
 });
 
 it('previews only selected decimal-string IDs, persists the URL, and never calls an activation endpoint', async () => {
@@ -232,7 +233,7 @@ it('surfaces inventory load failures and provides an explicit refresh', async ()
   const request = setup({ failLoad: true });
   expect((await screen.findByRole('alert')).textContent).toContain('Library database unavailable');
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-  await waitFor(() => expect(request.mock.calls).toHaveLength(2));
+  await waitFor(() => expect(request.mock.calls.filter(([path]) => path.startsWith('/api/library/management?'))).toHaveLength(2));
   expect(screen.queryByRole('button', { name: 'Preview reorganization (0)' })).toBeNull();
 });
 

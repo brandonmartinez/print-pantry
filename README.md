@@ -33,6 +33,7 @@ and `packages/indexer`.
 | `npm run test:browser` | Run synthetic localhost desktop/mobile Edge/Chromium request journeys (see below) |
 | `npm run db:generate` | Generate a reviewed SQL migration from schema changes |
 | `npm run db:migrate` | Apply versioned migrations to `DATABASE_URL` (build first) |
+| `npm run library -- --help` | Shared-backend bulk library adoption utility (build first; API must be running) |
 
 Migrations live in `packages/db/drizzle/`, including Drizzle's version journal.
 Commit generated SQL and journal together; inspect SQL before applying it. The
@@ -65,6 +66,11 @@ internal file layout, flag filesystem/storage blockers, and do not move or
 activate files. A separately approved migration copies and freshly verifies each
 project before explicit activation, preserving IDs and retaining legacy originals.
 Jobs support retry, cancellation of unactivated work, and verified restoration.
+For initial setup or large libraries, **Initialize or adopt an existing library**
+plans all indexed legacy projects and runs copy/verification and activation under
+two batch-level approvals. The CLI uses that same persistent backend, not a
+separate filesystem-moving script. See the
+[bulk initialization and CLI guide](docs/import-queue.md#bulk-library-initialization-and-cli).
 See the [library adoption testing checkpoint](docs/import-queue.md#library-adoption-copy-verify-activate-and-restore)
 before proceeding with library adoption.
 

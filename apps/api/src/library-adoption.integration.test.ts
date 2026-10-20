@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
@@ -10,6 +10,7 @@ import { hashPassword } from './auth.js';
 import { buildServer } from './server.js';
 import { createLibraryAdoptionRunner, createLibraryAdoptionService } from './library-adoption.js';
 import * as storage from './import-storage.js';
+import { runLibraryCli } from './library-cli.js';
 
 const database = process.env.TEST_DATABASE_URL;
 if (!database || new URL(database).pathname !== '/print_pantry_test') throw new Error('An isolated test database is required');
@@ -78,6 +79,7 @@ async function addFile(owner: { id: string; path: string }, filename: string) {
   const bytes = Buffer.from('Synthetic model bytes');
   const absolute = join(root, owner.path, filename);
   await writeFile(absolute, bytes);
+  await utimes(absolute, 1700000000, 1700000000);
   const stat = await lstat(absolute);
   const assetId = randomUUID(); const versionId = randomUUID();
   const hash = createHash('sha256').update(bytes).digest('hex');
@@ -308,3 +310,105 @@ it('streams a managed directory larger than the manual preview limit without tru
   await command(run.id, 'approve_copy');
   expect((await drain(run.id)).counts.copied).toBe(1);
 }, 30000);
+
+it('runs the authenticated utility through the same API for planning, copying, separate activation and restoration', async () => {
+  const owner = await project();
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? 'GET';
+    if (method !== 'GET' && method !== 'POST') throw new Error('Unexpected utility HTTP method');
+    const response = await server.inject({ method, url: `${url.pathname}${url.search}`,
+      headers: Object.fromEntries(new Headers(init?.headers).entries()), payload: init?.body ? String(init.body) : undefined });
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(response.headers)) {
+      if (typeof value === 'string') headers.set(key, value);
+      else if (Array.isArray(value)) for (const entry of value) headers.append(key, entry);
+    }
+    return new Response(response.statusCode === 204 ? null : response.body, { status: response.statusCode, headers });
+  };
+  const out = vi.fn(); const err = vi.fn();
+  const io = { fetch: fetcher, password: async () => 'Synthetic adoption passphrase', sleep: () => runner.tick(10), out, err };
+  const args = ['--username', users[0].name, '--password-stdin', '--json', '--wait'];
+  expect(await runLibraryCli(['plan', ...args], io)).toBe(0);
+  const planned: LibraryAdoptionRun = JSON.parse(out.mock.calls.at(-1)![0]);
+  expect(planned.state).toBe('review');
+  expect(await runLibraryCli(['copy', planned.id, ...args, '--fingerprint', planned.fingerprint, '--confirm-retained-copies', '--acknowledge-warnings'], io)).toBe(0);
+  expect(JSON.parse(out.mock.calls.at(-1)![0]).state).toBe('awaiting_activation');
+  expect((await pool.query('SELECT storage_kind FROM projects WHERE id=$1', [owner.id])).rows[0].storage_kind).toBe('legacy');
+  expect(await runLibraryCli(['activate', planned.id, ...args, '--fingerprint', planned.fingerprint, '--confirm-activation'], io)).toBe(0);
+  expect(JSON.parse(out.mock.calls.at(-1)![0]).state).toBe('completed');
+  expect(await runLibraryCli(['restore', planned.id, ...args, '--confirm-restoration'], io)).toBe(0);
+  expect(JSON.parse(out.mock.calls.at(-1)![0]).state).toBe('restored');
+  expect(err).not.toHaveBeenCalled();
+});
+
+it('surfaces changed server root configuration as a paused run rather than silently leaving work running', async () => {
+  await project();
+  const run = await create(); await drain(run.id);
+  await command(run.id, 'approve_copy');
+  const otherRoot = await mkdtemp(join(tmpdir(), 'pantry-adoption-wrong-config-'));
+  try {
+    const reconfigured = createLibraryAdoptionRunner(pool, { pool, root, managedRoot: otherRoot, indexer }, server.log);
+    await reconfigured.tick();
+    const result = await service.get(run.id);
+    expect(result.state).toBe('paused');
+    expect(result.lastError).toContain('Storage configuration');
+    expect(result.counts.copied).toBe(0);
+  } finally { await rm(otherRoot, { recursive: true, force: true }); }
+});
+
+it('does not reuse an old activation approval for copies verified by a later retry', async () => {
+  const a = await project(); const b = await project(); const c = await project();
+  const run = await create(); await drain(run.id);
+  const original = await lstat(c.absolute);
+  await writeFile(c.absolute, 'Changed source');
+  await command(run.id, 'approve_copy'); await drain(run.id);
+  const bItem = (await service.items(run.id)).items.find((item) => item.projectId === b.id)!;
+  const bJournal = (await pool.query<{ id: string }>('SELECT id FROM library_migration_projects WHERE migration_id=$1', [bItem.migrationId])).rows[0];
+  const staged = join(managedRoot, `projects/.migration-${bJournal.id}`, 'part.stl');
+  await writeFile(staged, 'Tampered staged model');
+  await command(run.id, 'activate');
+  expect((await drain(run.id)).counts).toMatchObject({ activated: 1, failed: 2 });
+  await writeFile(c.absolute, c.bytes); await utimes(c.absolute, original.atime, original.mtime);
+  await writeFile(staged, b.bytes);
+  let current = await service.get(run.id);
+  await service.command(run.id, { action: 'retry', stage: 'copy', expectedRevision: current.revision }, users[0].id);
+  expect((await drain(run.id)).state).toBe('awaiting_activation');
+  current = await service.get(run.id);
+  await service.command(run.id, { action: 'retry', stage: 'activate', expectedRevision: current.revision }, users[0].id);
+  const afterRetry = await drain(run.id);
+  expect(afterRetry.state).toBe('awaiting_activation');
+  expect(afterRetry.counts).toMatchObject({ activated: 2, copied: 1 });
+  expect((await pool.query('SELECT storage_kind FROM projects WHERE id=$1', [c.id])).rows[0].storage_kind).toBe('legacy');
+  expect((await pool.query('SELECT storage_kind FROM projects WHERE id=$1', [a.id])).rows[0].storage_kind).toBe('managed');
+  await command(run.id, 'activate');
+  expect((await drain(run.id)).state).toBe('completed');
+});
+
+it('does not reuse a restoration approval for projects activated after that approval', async () => {
+  const a = await project(); const b = await project();
+  const original = await lstat(b.absolute);
+  const run = await create(); await drain(run.id);
+  await writeFile(b.absolute, 'Changed source');
+  await command(run.id, 'approve_copy'); await drain(run.id);
+  await command(run.id, 'activate'); await drain(run.id);
+  const aItem = (await service.items(run.id)).items.find((item) => item.projectId === a.id)!;
+  const journal = (await pool.query<{ managed_path: string }>('SELECT managed_path FROM library_migration_projects WHERE migration_id=$1', [aItem.migrationId])).rows[0];
+  const managed = join(managedRoot, journal.managed_path, 'part.stl');
+  await writeFile(managed, 'Tampered managed model');
+  await command(run.id, 'restore');
+  expect((await drain(run.id)).counts.failed).toBe(2);
+  await writeFile(managed, a.bytes);
+  await writeFile(b.absolute, b.bytes); await utimes(b.absolute, original.atime, original.mtime);
+  let current = await service.get(run.id);
+  await service.command(run.id, { action: 'retry', stage: 'copy', expectedRevision: current.revision }, users[0].id);
+  await drain(run.id); await command(run.id, 'activate'); await drain(run.id);
+  current = await service.get(run.id);
+  await service.command(run.id, { action: 'retry', stage: 'restore', expectedRevision: current.revision }, users[0].id);
+  const afterRetry = await drain(run.id);
+  expect(afterRetry.state).toBe('partial');
+  expect(afterRetry.counts).toMatchObject({ restored: 1, activated: 1 });
+  expect((await pool.query('SELECT storage_kind FROM projects WHERE id=$1', [b.id])).rows[0].storage_kind).toBe('managed');
+  await command(run.id, 'restore');
+  expect((await drain(run.id)).state).toBe('restored');
+});

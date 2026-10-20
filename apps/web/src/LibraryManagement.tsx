@@ -1,22 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { LibraryManagementResponse, LibraryMigrationJob, LibraryMigrationProjectStatus, LibraryPlanIssue, LibraryReorganizationPlan, LibraryReorganizationProject } from '@print-pantry/contracts';
+import { LibraryAdoption } from './LibraryAdoption.js';
+import { LibraryFileSize as FileSize, libraryByteLabel as byteLabel } from './LibraryFileSize.js';
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
-const byteLabel = (value: string | null) => value === null ? 'Unknown' : `${BigInt(value).toLocaleString()} bytes`;
 const errorMessage = (reason: unknown) => reason instanceof Error ? reason.message : 'Library management failed; retry shortly.';
-
-function FileSize({ value }: { value: string | null }) {
-  if (value === null) return <span className="library-readable-size">Unknown</span>;
-  const bytes = BigInt(value);
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-  let unit = 0;
-  let divisor = 1n;
-  while (bytes >= divisor * 1024n && unit < units.length - 1) { divisor *= 1024n; unit++; }
-  const tenths = (bytes * 10n + divisor / 2n) / divisor;
-  const label = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(Number(tenths) / 10);
-  return <span className="library-readable-size" title={byteLabel(value)}>{label} {units[unit]}</span>;
-}
 
 function Issues({ items }: { items: LibraryPlanIssue[] }) {
   return <div className="library-issue-groups">{(['blocker', 'warning'] as const).map((severity) => {
@@ -196,6 +185,7 @@ export function LibraryManagement({ request }: { request: Request }) {
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const [inventoryRefresh, setInventoryRefresh] = useState(0);
+  const refreshInventory = useCallback(() => setInventoryRefresh((value) => value + 1), []);
   const [loading, setLoading] = useState(true);
   const [planLoading, setPlanLoading] = useState(false);
   const [previewBusy, setBusy] = useState(false);
@@ -250,6 +240,7 @@ export function LibraryManagement({ request }: { request: Request }) {
       <button className="button button-outline" type="button" disabled={busy || loading || planLoading} onClick={() => setRefresh((value) => value + 1)}>Refresh</button>
     </section>
     <p className="notice">Generating a dry run saves a database snapshot only. No files are copied, renamed, deleted, or activated by a preview. Migration requires separate approval, copying, verification, and activation.</p>
+    <LibraryAdoption request={request} legacyCount={data?.summary.legacy} refresh={refresh} onStorageChanged={refreshInventory} />
     {error && <p className="notice notice-error" role="alert">{error}</p>}
     {loading && <p role="status">Loading library inventory...</p>}
     {data && <>
