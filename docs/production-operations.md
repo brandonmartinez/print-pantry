@@ -35,6 +35,36 @@ must likewise be secret-mounted only for the dependency-install layer.
 
 ## Initial deployment
 
+### Optional AI credentials
+
+AI is optional; deterministic imports work without it. Set `AI_SETTINGS_KEY_FILE`
+in the deployment environment to an existing host file containing exactly 32
+random binary bytes. Restrict it to mode `0600` and make it readable by the API's
+container UID 1000. For example, create it outside this repository using
+`umask 077` and `openssl rand 32 > /private/path/pantry-ai.key`, then arrange its
+ownership for that UID. Compose bind-mounts it read-only into the API. An absent
+setting disables credential saves; a configured invalid/unreadable key fails
+startup rather than silently losing access to saved credentials.
+
+Provider credentials are AES-256-GCM encrypted in the site settings table with
+provider IDs bound to the ciphertext. Back up this key separately from database
+exports and include it in disaster-recovery procedures. Losing/changing it
+requires re-entering provider credentials; database restore alone is insufficient.
+Do not print it, commit it, or place it in an image. Development creates a private
+key under ignored `.pantry-data/ai-settings.key` unless a key path is configured.
+
+After deployment, operators open **AI settings**, add OpenAI API credentials or
+a separately authorized GitHub token with Copilot access, refresh account models,
+save a model selection, and choose one default provider. Copilot requires an
+eligible account/subscription and organizational approval where applicable; it
+does not reuse VS Code authentication. The SDK's platform runtime package must
+be available for the deployment architecture. Live provider authentication,
+model availability, and NAS runtime compatibility require an account-backed
+acceptance test on the target deployment. Never put real credentials in test
+fixtures. Image sharing is disabled by default and requires model capability
+confirmation plus per-request user consent. See the import checkpoint for
+data-sharing scope, limits, request recovery, and provider-retention caveats.
+
 Copy `deploy/production.env.example` into an ignored `.env`, fill its
 placeholders, and restrict access to the file. The live library is managed
 storage: set `MANAGED_LIBRARY_HOST_PATH` to an existing, application-writable

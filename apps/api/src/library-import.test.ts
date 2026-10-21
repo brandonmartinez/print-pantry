@@ -1,13 +1,14 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPool, runMigrations } from '@print-pantry/db';
 import type { LegacyImportSession } from '@print-pantry/contracts';
 import { createLegacyImportService, discoverLegacyLibrary, planLegacySelection, type LegacyImportEntry } from './library-import.js';
 import { buildServer } from './server.js';
 import { hashPassword } from './auth.js';
+import { createAiSettingsService } from './ai-settings.js';
 
 const roots: string[] = [];
 async function fixture(files: Record<string, string>) {
@@ -207,6 +208,140 @@ describe('saved operator library imports', () => {
     expect((await service.get(edited.id)).projects[0]).toMatchObject({ name: 'Desk holder', category: 'Home/Desk' });
     const stale = await server.inject({ method: 'POST', url: `/library/imports/${edited.id}/organize`, headers: { cookie }, payload: { expectedRevision: planned.revision } });
     expect(stale.statusCode).toBe(409);
+  });
+
+  async function aiService(generate: (profile: unknown, input: { prompt: string }) => Promise<string>, alternateId?: string) {
+    await pool.query('DELETE FROM site_ai_settings');
+    const ai = createAiSettingsService(pool, { encryptionKey: randomBytes(32), listModels: async () => [{ id: 'test-model', name: 'Test model', vision: false }] });
+    const id = randomUUID();
+    const update = { kind: 'openai' as const, name: 'Test provider', credential: 'synthetic-key', model: null,
+      allowImages: false, supportsImages: false, maxInputChars: 40000, maxOutputTokens: 8000 };
+    let state = await ai.save(0, id, update);
+    state = await ai.refreshModels(state.revision, id);
+    state = await ai.save(state.revision, id, { ...update, credential: undefined, model: 'test-model' });
+    state = await ai.setDefault(state.revision, id);
+    if (alternateId) {
+      const alternate = { ...update, kind: 'copilot' as const, name: 'Alternate Copilot', credential: 'alternate-key' };
+      state = await ai.save(state.revision, alternateId, alternate);
+      state = await ai.refreshModels(state.revision, alternateId);
+      await ai.save(state.revision, alternateId, { ...alternate, credential: undefined, model: 'test-model' });
+    }
+    return createLegacyImportService(pool, { root: source, importStorage: { intakeRoot: intake, managedRoot: managed }, ai, generate });
+  }
+
+  it('routes a proposal to the chosen profile without changing the site default or repeating inference', async () => {
+    const generate = vi.fn(async (_profile: unknown, input: { prompt: string }) => {
+      const inventory = JSON.parse(input.prompt);
+      return JSON.stringify({ projects: inventory.projects.map((project: LegacyImportSession['projects'][number]) => ({ key: project.key, name: project.name, category: project.category, paths: project.files.map(({ id, path }) => ({ id, path })) })) });
+    });
+    const alternateId = randomUUID();
+    const ai = await aiService(generate, alternateId);
+    const original = await plan();
+    await expect(ai.suggest(original.id, original.revision, randomUUID(), [], randomUUID())).rejects.toThrow();
+    expect(generate).not.toHaveBeenCalled();
+    const requestId = randomUUID();
+    const proposed = await ai.suggest(original.id, original.revision, requestId, [], alternateId);
+    expect(proposed.aiProposal).toMatchObject({ status: 'ready', provider: 'Alternate Copilot' });
+    expect(generate.mock.calls[0][0]).toMatchObject({ id: alternateId, kind: 'copilot', credential: 'alternate-key', model: 'test-model' });
+    await ai.suggest(original.id, original.revision, requestId, []);
+    expect(generate).toHaveBeenCalledTimes(1);
+    const settings = createAiSettingsService(pool, { encryptionKey: randomBytes(32), listModels: async () => [] });
+    expect((await settings.get()).defaultProviderId).not.toBe(alternateId);
+    await pool.query('DELETE FROM site_ai_settings');
+  });
+
+  it('persists a proposal without changing the plan, charges once per request ID and applies only explicitly', async () => {
+    const generate = vi.fn(async (_profile: unknown, input: { prompt: string }) => {
+      const inventory = JSON.parse(input.prompt);
+      return JSON.stringify({ projects: inventory.projects.map((project: LegacyImportSession['projects'][number]) => ({ key: project.key, name: 'AI desk holder', category: 'Home/Desk', paths: project.files.map(({ id, path }) => ({ id, path })) })) });
+    });
+    const ai = await aiService(generate);
+    const original = await plan();
+    const requestId = randomUUID();
+    const proposed = await ai.suggest(original.id, original.revision, requestId, []);
+    expect(proposed.projects).toEqual(original.projects);
+    expect(proposed.aiProposal?.status).toBe('ready');
+    expect((await ai.suggest(original.id, original.revision, requestId, [])).revision).toBe(proposed.revision);
+    expect(generate).toHaveBeenCalledTimes(1);
+    const applied = await ai.applySuggestion(proposed.id, proposed.revision, requestId);
+    expect(applied.projects[0].name).toBe('AI desk holder');
+    expect(applied.aiProposal?.status).toBe('applied');
+    expect(await readdir(intake)).toEqual([]);
+    expect(await readFile(join(source, 'Home/Holder/README.md'), 'utf8')).toBe('Instructions');
+    await pool.query('DELETE FROM site_ai_settings');
+  });
+
+  it('applies only selected AI destinations and retains current metadata and other files', async () => {
+    const ai = await aiService(async (_profile, input) => {
+      const inventory = JSON.parse(input.prompt);
+      return JSON.stringify({ projects: inventory.projects.map((project: LegacyImportSession['projects'][number]) => ({ key: project.key, name: 'AI title', category: 'AI category', paths: project.files.map(({ id, path }) => ({ id, path: path.replace(/([^/]+)$/, 'AI $1') })) })) });
+    });
+    const original = await plan();
+    const requestId = randomUUID();
+    const proposed = await ai.suggest(original.id, original.revision, requestId, []);
+    await expect(ai.applySuggestion(proposed.id, proposed.revision, requestId, { fileIds: [randomUUID()], metadataKeys: [] })).rejects.toThrow('Choose only');
+    const fileId = original.projects[0].files[0].id;
+    const applied = await ai.applySuggestion(proposed.id, proposed.revision, requestId, { fileIds: [fileId], metadataKeys: [] });
+    expect(applied.projects[0].name).toBe(original.projects[0].name);
+    expect(applied.projects[0].category).toBe(original.projects[0].category);
+    expect(applied.projects[0].files.find((file) => file.id === fileId)?.path).toBe(proposed.aiProposal!.projects[0].paths.find((file) => file.id === fileId)?.path);
+    expect(applied.projects[0].files.filter((file) => file.id !== fileId)).toEqual(original.projects[0].files.filter((file) => file.id !== fileId));
+    expect(applied.aiProposal?.status).toBe('applied');
+    expect(await readdir(intake)).toEqual([]);
+    await pool.query('DELETE FROM site_ai_settings');
+  });
+
+  it('rejects conflicting mixed destinations atomically but accepts the complete AI rename set', async () => {
+    await writeFile(join(source, 'Home/Holder/Other.stl'), 'second synthetic mesh');
+    const ai = await aiService(async (_profile, input) => {
+      const inventory = JSON.parse(input.prompt);
+      return JSON.stringify({ projects: inventory.projects.map((project: LegacyImportSession['projects'][number]) => {
+        const models = project.files.filter((file) => file.path.endsWith('.stl'));
+        return { key: project.key, name: 'AI title', category: project.category, paths: project.files.map(({ id, path }) => ({ id, path: id === models[0].id ? models[1].path : id === models[1].id ? models[0].path : path })) };
+      }) });
+    });
+    const original = await plan();
+    const requestId = randomUUID();
+    const proposed = await ai.suggest(original.id, original.revision, requestId, []);
+    const fileIds = original.projects[0].files.filter((file) => file.path.endsWith('.stl')).map((file) => file.id);
+    await expect(ai.applySuggestion(proposed.id, proposed.revision, requestId, { fileIds: [fileIds[0]], metadataKeys: [] })).rejects.toThrow('conflicts');
+    const unchanged = await ai.get(original.id);
+    expect(unchanged.projects).toEqual(original.projects);
+    expect(unchanged.aiProposal?.status).toBe('ready');
+    const response = await server.inject({ method: 'POST', url: `/library/imports/${original.id}/ai/apply`, headers: { cookie }, payload: {
+      expectedRevision: proposed.revision, requestId, selection: { fileIds, metadataKeys: [original.projects[0].key] },
+    } });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json<LegacyImportSession>().projects[0].name).toBe('AI title');
+    expect(response.json<LegacyImportSession>().aiProposal?.status).toBe('applied');
+    await pool.query('DELETE FROM site_ai_settings');
+  });
+
+  it('retains the deterministic plan on invalid AI output and never automatically retries failed calls', async () => {
+    const generate = vi.fn(async () => '{"projects":[]}');
+    const ai = await aiService(generate);
+    const original = await plan();
+    const requestId = randomUUID();
+    const failed = await ai.suggest(original.id, original.revision, requestId, []);
+    expect(failed.aiProposal?.status).toBe('failed');
+    expect(failed.projects).toEqual(original.projects);
+    await ai.suggest(original.id, original.revision, requestId, []);
+    expect(generate).toHaveBeenCalledTimes(1);
+    await expect(ai.applySuggestion(original.id, failed.revision, requestId)).rejects.toThrow('ready');
+    await pool.query('DELETE FROM site_ai_settings');
+  });
+
+  it('protects AI administration, generation and preview endpoints with operator access', async () => {
+    const session = await plan();
+    const routes = [
+      { method: 'GET' as const, url: '/admin/ai' },
+      { method: 'POST' as const, url: `/library/imports/${session.id}/ai`, payload: { expectedRevision: session.revision, requestId: randomUUID(), images: [] } },
+      { method: 'GET' as const, url: `/library/imports/${session.id}/files/${session.projects[0].files[0].id}/geometry` },
+    ];
+    for (const route of routes) {
+      expect((await server.inject(route)).statusCode).toBe(401);
+      expect((await server.inject({ ...route, headers: { cookie: requesterCookie } })).statusCode).toBe(403);
+    }
   });
 
   it('creates verified recovery and organized copies and resumes from a new service instance without publishing', async () => {

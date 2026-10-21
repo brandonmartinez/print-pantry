@@ -2,14 +2,16 @@ import { useEffect, useId, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { Camera } from 'lucide-react';
 
 export type Point3D = [number, number, number];
 export type Triangle = [Point3D, Point3D, Point3D];
 export type MeshGeometry = { triangles: Triangle[]; sampled: boolean };
 
-export default function MeshViewer({ fileName, geometry }: { fileName: string; geometry: MeshGeometry }) {
+export default function MeshViewer({ fileName, geometry, onSnapshot }: { fileName: string; geometry: MeshGeometry; onSnapshot?: (data: string) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const resetViewRef = useRef<() => void>(() => undefined);
+  const snapshotRef = useRef<() => string>(() => '');
   const instructionsId = useId();
 
   useEffect(() => {
@@ -105,6 +107,15 @@ export default function MeshViewer({ fileName, geometry }: { fileName: string; g
       frame = window.requestAnimationFrame(renderFrame);
     };
     renderFrame();
+    snapshotRef.current = () => {
+      renderer.render(scene, camera);
+      const image = document.createElement('canvas');
+      const scale = Math.min(1, 768 / Math.max(canvas.width, canvas.height));
+      image.width = Math.max(1, Math.round(canvas.width * scale));
+      image.height = Math.max(1, Math.round(canvas.height * scale));
+      image.getContext('2d')!.drawImage(canvas, 0, 0, image.width, image.height);
+      return image.toDataURL('image/png');
+    };
 
     return () => {
       window.cancelAnimationFrame(frame);
@@ -116,6 +127,7 @@ export default function MeshViewer({ fileName, geometry }: { fileName: string; g
       (floor.material as THREE.Material).dispose();
       renderer.dispose();
       resetViewRef.current = () => undefined;
+      snapshotRef.current = () => '';
     };
   }, [geometry]);
 
@@ -136,6 +148,7 @@ export default function MeshViewer({ fileName, geometry }: { fileName: string; g
           {geometry.sampled && <span> Uses optimized preview geometry.</span>}
         </figcaption>
         <button className="mesh-reset" onClick={() => resetViewRef.current()} type="button">Reset view</button>
+        {onSnapshot && <button type="button" className="legacy-icon-button" title="Attach this render to the AI request" aria-label="Attach this render to the AI request" onClick={() => { const data = snapshotRef.current(); if (data) onSnapshot(data); }}><Camera size={18} /></button>}
       </div>
     </figure>
   );

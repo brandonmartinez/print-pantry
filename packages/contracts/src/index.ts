@@ -1,3 +1,15 @@
+export type AiProviderKind = 'openai' | 'copilot';
+export type AiModel = { id: string; name: string; vision: boolean | null };
+export type AiProviderProfile = {
+  id: string; kind: AiProviderKind; name: string; model: string | null;
+  hasCredential: boolean; models: AiModel[]; modelsUpdatedAt: string | null;
+  allowImages: boolean; supportsImages: boolean; maxInputChars: number; maxOutputTokens: number;
+};
+export type SiteAiSettings = {
+  revision: number; encryptedStorageReady: boolean;
+  defaultProviderId: string | null; providers: AiProviderProfile[];
+};
+export type AiProviderUpdate = Pick<AiProviderProfile, 'kind' | 'name' | 'model' | 'allowImages' | 'supportsImages' | 'maxInputChars' | 'maxOutputTokens'> & { credential?: string };
 export const projectIdPattern = '^[1-9][0-9]{0,18}$';
 export const maximumProjectId = '9223372036854775807';
 
@@ -186,6 +198,16 @@ export interface LegacyImportSession {
   projects: LegacyImportProject[];
   issues: Array<{ path: string; message: string }>;
   lastError: string | null;
+  aiProposal?: {
+    requestId: string;
+    status: 'pending' | 'ready' | 'failed' | 'applied';
+    provider: string;
+    model: string;
+    createdAt: string;
+    imageCount: number;
+    error: string | null;
+    projects: Array<{ key: string; name: string; category: string | null; paths: Array<{ id: string; path: string }> }>;
+  } | null;
 }
 
 export interface LegacyImportSessions {

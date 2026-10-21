@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LegacyImportEntry, LegacyImportSession } from '@print-pantry/contracts';
 import { LibraryImport } from './LibraryImport.js';
 
-function fixture(saved = false, multiple = false, failPlan = false, failLoad = false) {
+function fixture(saved = false, multiple = false, failPlan = false, failLoad = false, proposalMode?: 'changed' | 'unchanged') {
   const file: LegacyImportEntry = { path: 'Tools/Holder/part.STL', name: 'part.STL', kind: 'file', fileCount: 1, modelCount: 1, sizeBytes: 12, suggested: false, evidence: [], children: [] };
   const holder: LegacyImportEntry = { ...file, path: 'Tools/Holder', name: 'Holder', kind: 'directory', suggested: true, children: [file] };
   const tools: LegacyImportEntry = { ...holder, path: 'Tools', name: 'Tools', suggested: false, children: [holder] };
@@ -18,8 +18,27 @@ function fixture(saved = false, multiple = false, failPlan = false, failLoad = f
     if (path.endsWith('/selection')) session = { ...session, selectedRoots: body.roots, layout: body.layout, state: 'selecting', projects: [] };
     if (path.endsWith('/plan')) session = { ...session, state: 'planned', projects: [{ key: 'holder', sourcePath: 'Tools/Holder', name: 'Holder', category: 'Tools', linked: false, status: 'planned', directories: [], files: [{ id: 'part', originalPath: 'part.STL', path: 'models/part.stl', size: 12, hash: null }], warnings: [], blockers: [] }] };
     if (path.endsWith('/plan') && multiple) session.projects.push({ ...structuredClone(session.projects[0]), key: 'tray', sourcePath: 'Tools/Tray', name: 'Tray' });
+    if (path.endsWith('/plan') && proposalMode) {
+      session.projects = session.projects.map((project) => ({ ...project, files: [
+        { ...project.files[0], id: `${project.key}-part` },
+        { id: `${project.key}-readme`, originalPath: 'README.md', path: 'README.md', size: 10, hash: null },
+      ] }));
+      session.aiProposal = { requestId: 'proposal', provider: 'Test provider', model: 'test-model', createdAt: '', imageCount: 0, error: null, status: 'ready',
+        projects: session.projects.map((project) => ({ key: project.key, name: proposalMode === 'changed' ? `AI ${project.name}` : project.name, category: project.category,
+          paths: project.files.map(({ id, path }) => ({ id, path: proposalMode === 'changed' && path.endsWith('.stl') ? `models/AI ${project.name}.stl` : path })),
+        })),
+      };
+    }
     if (path.endsWith('/edit')) session = { ...session, projects: session.projects.map((project) => project.key === body.key ? { ...project, name: body.name.trim(), category: body.category, files: project.files.map((entry) => ({ ...entry, path: body.paths.find((item: { id: string }) => item.id === entry.id).path })) } : project) };
     if (path.endsWith('/organize')) session = { ...session, state: 'organized', projects: session.projects.map((project) => ({ ...project, status: 'organized' })) };
+    if (path.endsWith('/ai/apply') && session.aiProposal) {
+      const proposal = session.aiProposal;
+      session = { ...session, aiProposal: { ...proposal, status: 'applied' }, projects: session.projects.map((project) => {
+        const proposed = proposal.projects.find((item) => item.key === project.key)!;
+        return { ...project, ...(body.selection.metadataKeys.includes(project.key) ? { name: proposed.name, category: proposed.category } : {}),
+          files: project.files.map((file) => body.selection.fileIds.includes(file.id) ? { ...file, path: proposed.paths.find((item) => item.id === file.id)!.path } : file) };
+      }) };
+    }
     if (init?.method === 'POST') session = { ...session, revision: session.revision + 1 };
     return structuredClone(session);
   });
@@ -65,12 +84,104 @@ describe('guided legacy library import', () => {
     expect(request.mock.calls.some(([path]) => /activate|publish|migrate/.test(path))).toBe(false);
   });
 
+  it('locks preparation and manual edits while a provider request is pending', async () => {
+    const request = fixture(true);
+    const original = request.getMockImplementation()!;
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    request.mockImplementation(async (path, init) => {
+      if (path === '/api/admin/ai') return { revision: 1, encryptedStorageReady: true, defaultProviderId: 'provider', providers: [{ id: 'provider', name: 'Test provider', model: 'test-model', hasCredential: true }] } as unknown as LegacyImportSession;
+      if (path.endsWith('/ai')) {
+        await pending;
+        return original(path.slice(0, -3));
+      }
+      return original(path, init);
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Review organization' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'AI organization' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'I approve sending this inventory and attached renders.' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate proposal' }));
+    for (const name of ['Prepare files', 'Refresh import', 'Choose projects']) {
+      expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true);
+    }
+    expect((screen.getByRole('textbox', { name: 'Project name for Tools/Holder' }) as HTMLInputElement).disabled).toBe(true);
+    finish();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Prepare files' }) as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByRole('textbox', { name: 'Project name for Tools/Holder' }) as HTMLInputElement).disabled).toBe(false);
+    expect(request.mock.calls.some(([path]) => path.endsWith('/organize'))).toBe(false);
+  });
+
   it('filters the source tree without changing saved selections', async () => {
     const request = fixture(true);
     fireEvent.change(await screen.findByRole('searchbox', { name: 'Find folders or files' }), { target: { value: 'part.STL' } });
     expect(await screen.findByText('part.STL')).toBeTruthy();
     expect((screen.getByRole('checkbox', { name: 'Import Tools/Holder' }) as HTMLInputElement).checked).toBe(true);
     expect(request.mock.calls.some(([path]) => path.endsWith('/selection'))).toBe(false);
+  });
+
+  it('shows only differing AI alternatives beside current destinations and applies a per-file choice', async () => {
+    const request = fixture(true, true, false, false, 'changed');
+    fireEvent.click(await screen.findByRole('button', { name: 'Review organization' }));
+    const alternative = await screen.findByRole('radio', { name: 'Use AI destination for part.STL in Tools/Holder' });
+    expect(screen.getAllByRole('columnheader', { name: 'AI alternative' })).toHaveLength(2);
+    expect(screen.queryByRole('radio', { name: /Use AI destination for README/ })).toBeNull();
+    expect((alternative as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole('button', { name: 'Apply selected changes' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(alternative);
+    expect((screen.getByRole('textbox', { name: 'Destination for part.STL in Tools/Holder' }) as HTMLInputElement).value).toBe('models/part.stl');
+    expect((screen.getByRole('button', { name: 'Prepare files' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(request.mock.calls.some(([path]) => path.endsWith('/ai/apply'))).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply selected changes' }));
+    await waitFor(() => expect((screen.getByRole('textbox', { name: 'Destination for part.STL in Tools/Holder' }) as HTMLInputElement).value).toBe('models/AI Holder.stl'));
+    expect((screen.getByRole('textbox', { name: 'Destination for part.STL in Tools/Tray' }) as HTMLInputElement).value).toBe('models/part.stl');
+    expect((screen.getByRole('textbox', { name: 'Project name for Tools/Holder' }) as HTMLInputElement).value).toBe('Holder');
+    const [, init] = request.mock.calls.find(([path]) => path.endsWith('/ai/apply'))!;
+    expect(JSON.parse(String(init?.body)).selection).toEqual({ fileIds: ['holder-part'], metadataKeys: [] });
+  });
+
+  it('selects all AI changes, clears them, and allows individual overrides before applying', async () => {
+    const request = fixture(true, true, false, false, 'changed');
+    fireEvent.click(await screen.findByRole('button', { name: 'Review organization' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Select all AI changes' }));
+    for (const input of screen.getAllByRole('radio', { name: /Use AI destination/ })) expect((input as HTMLInputElement).checked).toBe(true);
+    for (const input of screen.getAllByRole('checkbox', { name: /Use AI project details/ })) expect((input as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Keep all current' }));
+    expect((screen.getByRole('button', { name: 'Apply selected changes' }) as HTMLButtonElement).disabled).toBe(true);
+    for (const input of screen.getAllByRole('radio', { name: /Keep current destination/ })) expect((input as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Select all AI changes' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Keep current destination for part.STL in Tools/Tray' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply selected changes' }));
+    await waitFor(() => expect((screen.getByRole('textbox', { name: 'Project name for Tools/Holder' }) as HTMLInputElement).value).toBe('AI Holder'));
+    const [, init] = request.mock.calls.find(([path]) => path.endsWith('/ai/apply'))!;
+    expect(JSON.parse(String(init?.body)).selection).toEqual({ fileIds: ['holder-part'], metadataKeys: ['holder', 'tray'] });
+    expect((screen.getByRole('textbox', { name: 'Destination for part.STL in Tools/Tray' }) as HTMLInputElement).value).toBe('models/part.stl');
+  });
+
+  it('shows a no-changes state without selectable alternatives for an identical proposal', async () => {
+    fixture(true, false, false, false, 'unchanged');
+    fireEvent.click(await screen.findByRole('button', { name: 'Review organization' }));
+    expect(await screen.findByText('No AI changes.')).toBeTruthy();
+    expect(screen.queryByRole('radio')).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /Use AI project details/ })).toBeNull();
+    expect((screen.getByRole('button', { name: 'Select all AI changes' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Prepare files' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('retains current destinations and choices after a mixed-selection conflict', async () => {
+    const request = fixture(true, false, false, false, 'changed');
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (path, init) => {
+      if (path.endsWith('/ai/apply')) throw new Error('The AI proposal conflicts with the current organization.');
+      return original(path, init);
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Review organization' }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Use AI destination for part.STL in Tools/Holder' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply selected changes' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('conflicts');
+    expect((screen.getByRole('radio', { name: 'Use AI destination for part.STL in Tools/Holder' }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('textbox', { name: 'Destination for part.STL in Tools/Holder' }) as HTMLInputElement).value).toBe('models/part.stl');
+    fireEvent.click(screen.getByRole('button', { name: 'Keep all current' }));
+    expect((screen.getByRole('button', { name: 'Prepare files' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('retains other unsaved projects when one project is saved and normalizes saved metadata', async () => {

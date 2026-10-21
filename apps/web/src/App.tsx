@@ -5,6 +5,7 @@ import { ImportQueue } from './ImportQueue.js';
 import { SourceDiscovery } from './SourceDiscovery.js';
 import { LibraryManagement } from './LibraryManagement.js';
 import { LibraryImport } from './LibraryImport.js';
+import { AiSettings } from './AiSettings.js';
 
 type User = { id: string; username: string; role: 'operator' | 'member' | string };
 type RequestStatus = 'requested' | 'queued' | 'printing' | 'completed' | 'declined' | 'canceled' | string;
@@ -1040,7 +1041,7 @@ function RoutedApp() {
   const navigate = useNavigate();
   const projectMatch = matchPath('/projects/:projectId', location.pathname);
   const selectedProjectId = projectMatch?.params.projectId ?? null;
-  const activeView = location.pathname === '/import-library' ? 'library-import' : location.pathname === '/manage-library' ? 'management' : location.pathname === '/imports' ? 'imports' : location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
+  const activeView = location.pathname === '/settings/ai' ? 'ai-settings' : location.pathname === '/import-library' ? 'library-import' : location.pathname === '/manage-library' ? 'management' : location.pathname === '/imports' ? 'imports' : location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
@@ -1076,7 +1077,7 @@ function RoutedApp() {
   }, []);
 
   useEffect(() => {
-    const knownPath = location.pathname === '/' || location.pathname === '/requests' || location.pathname === '/queue' || location.pathname === '/imports' || location.pathname === '/manage-library' || location.pathname === '/import-library'
+    const knownPath = location.pathname === '/' || location.pathname === '/settings/ai' || location.pathname === '/requests' || location.pathname === '/queue' || location.pathname === '/imports' || location.pathname === '/manage-library' || location.pathname === '/import-library'
       || Boolean(projectMatch);
     if (!knownPath) navigate('/', { replace: true });
   }, [location.pathname, navigate, projectMatch]);
@@ -1193,6 +1194,7 @@ function RoutedApp() {
           <Link className={activeView === 'imports' ? 'nav-link active' : 'nav-link'} aria-current={activeView === 'imports' ? 'page' : undefined} to="/imports">Imports</Link>
           {user.role === 'operator' && <Link className={activeView === 'management' ? 'nav-link active' : 'nav-link'}
             aria-current={activeView === 'management' ? 'page' : undefined} to="/manage-library">Manage library</Link>}
+          {user.role === 'operator' && <Link className={activeView === 'ai-settings' ? 'nav-link active' : 'nav-link'} to="/settings/ai">AI settings</Link>}
         </nav>
         <div className="account-menu">
           <span className="user-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
@@ -1204,7 +1206,9 @@ function RoutedApp() {
       {authError && <div className="global-notice notice-error" role="alert">{authError}</div>}
       {connectionError && <div className="global-notice notice-error" role="alert">{connectionError}</div>}
 
-      {activeView === 'library-import'
+      {activeView === 'ai-settings'
+        ? <main className="content-wrap">{user.role === 'operator' ? <AiSettings request={apiRequest} /> : <p role="alert">AI settings require operator access.</p>}</main>
+        : activeView === 'library-import'
         ? user.role === 'operator' ? <main className="content-wrap"><LibraryImport request={apiRequest} /></main> : <main className="content-wrap"><p className="notice notice-error" role="alert">Library import requires operator access.</p><Link to="/">Back to library</Link></main>
         : activeView === 'management'
         ? user.role === 'operator' ? <LibraryManagement request={apiRequest} /> : <main className="content-wrap"><p className="notice notice-error" role="alert">Library management requires operator access.</p><Link to="/">Back to library</Link></main>

@@ -14,11 +14,13 @@
     "account:seed-dev": "tsx src/seed-dev.ts"
   },
   "dependencies": {
+    "@github/copilot-sdk": "^1.0.24",
     "@print-pantry/contracts": "0.1.0",
     "@print-pantry/db": "0.1.0",
     "@print-pantry/indexer": "0.1.0",
     "fast-xml-parser": "^5.11.2",
     "fastify": "^5.6.2",
+    "openai": "^7.32.0",
     "pg": "^8.23.1",
     "yauzl": "^3.4.0"
   },

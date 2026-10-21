@@ -311,6 +311,14 @@ metadata.
 
 ### AI-assisted mode: optional enrichment
 
+Current implementation: site-wide operator profiles for both OpenAI and the
+official Copilot SDK, account model discovery, one explicit default, encrypted
+credentials, consented bounded inventory sharing, optional captured renders,
+and persisted proposals with explicit acceptance. See
+[the AI checkpoint](import-queue.md#optional-ai-organization). The implemented
+proposal retains selected project boundaries and suggests titles, categories,
+and file paths only; broader enrichment below remains planned.
+
 Provide a configurable suggestion-provider boundary for OpenAI and GitHub
 Copilot. Direct OpenAI integration is the first implementation option; Copilot
 requires a separately authenticated SDK runtime. Let operators configure the
@@ -341,10 +349,10 @@ Copilot is technically an option: the official SDK can run through a separately
 authenticated Copilot CLI runtime, with account/usage requirements. The
 deployment cannot assume access to the editor's session or subscription.
 
-Prefer direct OpenAI integration for the initial optional provider because
-this task only needs constrained suggestions, not an agent runtime. Keep the
-suggestion boundary small enough to add Copilot later after validating NAS
-authentication, permitted account usage, lifecycle, and billing.
+Direct OpenAI Responses and tool-free Copilot SDK sessions implement the same
+constrained suggestion boundary. Validate NAS authentication, permitted account
+usage, runtime architecture, lifecycle, and billing with real account credentials
+on the target deployment before enabling Copilot for household use.
 
 References:
 [SDK overview](https://github.com/github/copilot-sdk),

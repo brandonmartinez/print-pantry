@@ -12,10 +12,18 @@ import { hashStoredFile, IntakeError, normalizeImportPath, organizeFiles, portab
 import { isOsMetadata } from './os-metadata.js';
 import { openLibraryFile } from './files.js';
 import type { createAuth } from './auth.js';
+import type { GeometryReader } from './catalog.js';
+import type { AiSettingsService } from './ai-settings.js';
+import { generateAiOrganization, type AiGeneration } from './ai-providers.js';
+import { AiError } from './ai-secrets.js';
+import { organizationImages, organizationInstructions, organizationSchema, validateOrganization, type RenderAttachment } from './ai-organization.js';
+import { interactivePreviewTriangles, readStlTriangles } from './mesh-preview.js';
+import { createPreviewLimiter, PreviewBusyError } from './preview-limit.js';
 
 export type LegacyImportFile = {
   path: string; size: number; mtime: number; device: string; inode: string;
 };
+type AiProposalSelection = { fileIds: string[]; metadataKeys: string[] };
 export type LegacyImportDiscovery = {
   tree: LegacyImportEntry;
   files: LegacyImportFile[];
@@ -182,7 +190,9 @@ export async function discoverLegacyLibrary(root: string, ignoredDirectories: st
 }
 
 type Pool = ReturnType<typeof createPool>;
-export type LegacyImportOptions = { root?: string; importStorage?: ImportStorage; ignoredDirectories?: string[] };
+export type LegacyImportOptions = { root?: string; importStorage?: ImportStorage; ignoredDirectories?: string[];
+  read3mfGeometry?: GeometryReader; ai?: AiSettingsService;
+  generate?: (profile: Awaited<ReturnType<AiSettingsService['runtime']>>, input: AiGeneration) => Promise<string> };
 type Snapshot = {
   session: LegacyImportSession;
   discovery: LegacyImportDiscovery;
@@ -191,6 +201,7 @@ type Snapshot = {
   managedRoot: string;
   identities: string[];
   catalogMetadata: unknown[];
+  aiRequests?: string[];
 };
 type SessionRow = { snapshot: Snapshot; state: LegacyImportSession['state']; revision: number; created_at: Date; updated_at: Date };
 const failureMessage = (error: unknown) => error instanceof IntakeError ? error.message : 'Files could not be prepared. Check storage access and retry; the original library is unchanged.';
@@ -297,6 +308,7 @@ export function createLegacyImportService(pool: Pool, options: LegacyImportOptio
         if (!['selecting', 'planned'].includes(snapshot.session.state)) throw new IntakeError('Files are already being prepared. Start another import to change the selection.', 409);
         validateLegacySelection(snapshot.discovery, roots);
         Object.assign(snapshot.session, { selectedRoots: roots, layout, state: 'selecting', projects: [], lastError: null });
+        snapshot.session.aiProposal = null;
         return save(client, snapshot);
       });
     },
@@ -329,8 +341,90 @@ export function createLegacyImportService(pool: Pool, options: LegacyImportOptio
           file.path = changed.path;
         }
         checkLegacyProject(project, snapshot.session.layout === 'preserve');
+        snapshot.session.aiProposal = null;
         return save(client, snapshot);
       });
+    },
+    async suggest(id: string, revision: number, requestId: string, attachments: RenderAttachment[], providerId?: string) {
+      return operation(id, undefined, async (client, snapshot) => {
+        if (snapshot.session.aiProposal?.requestId === requestId) return snapshot.session;
+        if (snapshot.aiRequests?.includes(requestId)) throw new AiError('This AI request was already submitted. Refresh the import.', 409);
+        if (snapshot.session.revision !== revision || snapshot.session.state !== 'planned') throw new AiError('Refresh and save an unprepared plan before requesting AI suggestions.', 409);
+        if (!options.ai) throw new AiError('Configure AI settings first.', 409);
+        const profile = await options.ai.runtime(providerId);
+        const images = organizationImages(attachments, snapshot.session.projects);
+        if (images.length && (!profile.allowImages || !profile.supportsImages)) throw new AiError('Enable render sharing for the selected model in AI settings first.');
+        const prompt = JSON.stringify({ layout: snapshot.session.layout, projects: snapshot.session.projects.map((project) => ({
+          key: project.key, sourcePath: project.sourcePath, name: project.name, category: project.category, linked: project.linked,
+          files: project.files.map(({ id, originalPath, path, size }) => ({ id, originalPath, path, size })),
+        })), images: attachments.map((image) => ({ fileId: image.fileId })) });
+        if (prompt.length > profile.maxInputChars) throw new AiError('The inventory exceeds the provider input limit. Select fewer projects or increase the limit in AI settings.');
+        if ((snapshot.aiRequests?.length ?? 0) >= 20) throw new AiError('This import has reached its 20-request AI limit.');
+        snapshot.aiRequests = [...snapshot.aiRequests ?? [], requestId];
+        snapshot.session.aiProposal = { requestId, status: 'pending', provider: profile.name, model: profile.model!,
+          createdAt: new Date().toISOString(), imageCount: images.length, error: null, projects: [] };
+        await save(client, snapshot);
+        try {
+          const text = await (options.generate ?? generateAiOrganization)(profile, { instructions: organizationInstructions, prompt, schema: organizationSchema, images });
+          snapshot.session.aiProposal.projects = validateOrganization(text, snapshot.session.projects, snapshot.session.layout === 'preserve');
+          snapshot.session.aiProposal.status = 'ready';
+        } catch (error) {
+          snapshot.session.aiProposal.status = 'failed';
+          snapshot.session.aiProposal.error = error instanceof AiError ? error.message : 'The AI request failed. Your current plan is unchanged.';
+        }
+        return save(client, snapshot);
+      });
+    },
+    async applySuggestion(id: string, revision: number, requestId: string, selection?: AiProposalSelection) {
+      return operation(id, revision, async (client, snapshot) => {
+        const proposal = snapshot.session.aiProposal;
+        if (snapshot.session.state !== 'planned' || proposal?.requestId !== requestId || proposal.status !== 'ready') throw new AiError('No current AI proposal is ready to apply.', 409);
+        const validated = validateOrganization(JSON.stringify({ projects: proposal.projects }), snapshot.session.projects, snapshot.session.layout === 'preserve');
+        if (selection) {
+          const fileIds = new Set(validated.flatMap((project) => project.paths.map((file) => file.id)));
+          const projectKeys = new Set(validated.map((project) => project.key));
+          if (new Set(selection.fileIds).size !== selection.fileIds.length || new Set(selection.metadataKeys).size !== selection.metadataKeys.length ||
+            selection.fileIds.some((fileId) => !fileIds.has(fileId)) || selection.metadataKeys.some((key) => !projectKeys.has(key))) {
+            throw new AiError('Choose only files and project details from this proposal.');
+          }
+        }
+        const projects = structuredClone(snapshot.session.projects);
+        for (const changed of validated) {
+          const project = projects.find((project) => project.key === changed.key)!;
+          if (!selection || selection.metadataKeys.includes(project.key)) {
+            project.name = changed.name; project.category = changed.category;
+          }
+          for (const file of project.files) {
+            if (!selection || selection.fileIds.includes(file.id)) file.path = changed.paths.find((item) => item.id === file.id)!.path;
+          }
+          checkLegacyProject(project, snapshot.session.layout === 'preserve');
+          if (project.blockers.length) throw new AiError('The AI proposal conflicts with the current organization.');
+        }
+        snapshot.session.projects = projects;
+        proposal.status = 'applied';
+        return save(client, snapshot);
+      });
+    },
+    async geometry(id: string, fileId: string) {
+      const snapshot = await read(pool, id);
+      await checkStorage(snapshot);
+      const project = snapshot.session.projects.find((project) => project.files.some((file) => file.id === fileId));
+      const file = project?.files.find((file) => file.id === fileId);
+      if (!project || !file) throw new IntakeError('File not found in this import', 404);
+      const relative = project.sourcePath ? `${project.sourcePath}/${file.originalPath}` : file.originalPath;
+      const expected = snapshot.discovery.files.find((file) => file.path === relative)!;
+      const extension = extname(file.originalPath).toLowerCase();
+      if (!['.stl', '.3mf'].includes(extension)) throw new IntakeError('Preview is available for STL and 3MF files.', 415);
+      const { handle, stats } = await openLibraryFile(snapshot.sourceRoot, relative);
+      try {
+        if (stats.size !== expected.size || stats.mtimeMs !== expected.mtime || String(stats.dev) !== expected.device || String(stats.ino) !== expected.inode) throw new IntakeError('The source changed. Start another import.', 409);
+        if (extension === '.3mf') {
+          if (!options.read3mfGeometry) throw new IntakeError('3MF previews are unavailable.', 415);
+          return await options.read3mfGeometry(handle);
+        }
+        const triangles = await readStlTriangles(handle, stats.size, interactivePreviewTriangles);
+        return { triangles, sampled: triangles.length >= interactivePreviewTriangles };
+      } finally { await handle.close(); }
     },
     async organize(id: string, revision: number) {
       return operation(id, revision, async (client, snapshot) => {
@@ -421,8 +515,41 @@ export function createLegacyImportRunner(pool: Pool, options: LegacyImportOption
 
 export function registerLegacyImports(server: FastifyInstance, pool: Pool, auth: ReturnType<typeof createAuth>, options: LegacyImportOptions) {
   const service = createLegacyImportService(pool, options);
+  const preview = createPreviewLimiter();
   const params = { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', pattern: uuidPattern } } } as const;
   const revisionProperty = { type: 'integer', minimum: 0 } as const;
+  server.post<{ Params: { id: string }; Body: { expectedRevision: number; requestId: string; images: RenderAttachment[]; providerId?: string } }>('/library/imports/:id/ai', {
+    preHandler: auth.operatorOnly, bodyLimit: 4_300_000,
+    schema: { params, body: { type: 'object', additionalProperties: false, required: ['expectedRevision', 'requestId', 'images'], properties: {
+      expectedRevision: revisionProperty, requestId: { type: 'string', pattern: uuidPattern }, providerId: { type: 'string', pattern: uuidPattern }, images: { type: 'array', maxItems: 3, items: {
+        type: 'object', additionalProperties: false, required: ['fileId', 'data'], properties: { fileId: { type: 'string', pattern: uuidPattern }, data: { type: 'string', maxLength: 1400000 } },
+      } },
+    } } },
+  }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try { return await service.suggest(request.params.id, request.body.expectedRevision, request.body.requestId, request.body.images, request.body.providerId); }
+    catch (error) { return reply.code(error instanceof AiError || error instanceof IntakeError ? error.status : 500).send({ error: error instanceof AiError ? error.message : failureMessage(error) }); }
+  });
+  server.post<{ Params: { id: string }; Body: { expectedRevision: number; requestId: string; selection?: AiProposalSelection } }>('/library/imports/:id/ai/apply', {
+    preHandler: auth.operatorOnly, bodyLimit: 1_000_000, schema: { params, body: { type: 'object', additionalProperties: false, required: ['expectedRevision', 'requestId'], properties: {
+      expectedRevision: revisionProperty, requestId: { type: 'string', pattern: uuidPattern }, selection: {
+        type: 'object', additionalProperties: false, required: ['fileIds', 'metadataKeys'], properties: {
+          fileIds: { type: 'array', maxItems: legacyImportLimits.files, uniqueItems: true, items: { type: 'string', pattern: uuidPattern } },
+          metadataKeys: { type: 'array', maxItems: legacyImportLimits.projects, uniqueItems: true, items: { type: 'string', pattern: uuidPattern } },
+        },
+      },
+    } } },
+  }, async (request, reply) => {
+    try { return await service.applySuggestion(request.params.id, request.body.expectedRevision, request.body.requestId, request.body.selection); }
+    catch (error) { return reply.code(error instanceof AiError || error instanceof IntakeError ? error.status : 500).send({ error: error instanceof AiError ? error.message : failureMessage(error) }); }
+  });
+  server.get<{ Params: { id: string; fileId: string } }>('/library/imports/:id/files/:fileId/geometry', {
+    preHandler: auth.operatorOnly, schema: { params: { type: 'object', required: ['id', 'fileId'], properties: { id: { type: 'string', pattern: uuidPattern }, fileId: { type: 'string', pattern: uuidPattern } } } },
+  }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try { return await preview(() => service.geometry(request.params.id, request.params.fileId)); }
+    catch (error) { return reply.code(error instanceof IntakeError ? error.status : error instanceof PreviewBusyError ? 503 : 422).send({ error: error instanceof IntakeError || error instanceof PreviewBusyError ? error.message : 'This file could not be previewed safely.' }); }
+  });
   server.get('/library/imports', { preHandler: auth.operatorOnly }, () => service.list());
   server.get<{ Params: { id: string } }>('/library/imports/:id', { preHandler: auth.operatorOnly, schema: { params } }, async (request, reply) => {
     try { return await service.get(request.params.id); }

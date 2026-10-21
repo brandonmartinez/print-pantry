@@ -32,6 +32,7 @@ services:
       LEGACY_LIBRARY_ROOT: ${LEGACY_LIBRARY_HOST_PATH:+/mnt/legacy-library}
       IMPORT_STORAGE_ROOT: /var/lib/print-pantry/imports
       MANAGED_LIBRARY_ROOT: /var/lib/print-pantry/managed
+      AI_SETTINGS_KEY_FILE: ${AI_SETTINGS_KEY_FILE:+/run/secrets/ai_settings_key}
       MANAGED_CLIENT_MOUNT_PREFIX: ${MANAGED_CLIENT_MOUNT_PREFIX:-}
       LEGACY_LIBRARY_IGNORED_DIRS: ${LEGACY_LIBRARY_IGNORED_DIRS:-}
       LEGACY_LIBRARY_ALLOW_EMPTY: ${LEGACY_LIBRARY_ALLOW_EMPTY:-false}
@@ -44,6 +45,7 @@ services:
     volumes:
       - ${LEGACY_LIBRARY_HOST_PATH:-./.devcontainer/empty-library}:/mnt/legacy-library:ro
       - pantry_import_data:/var/lib/print-pantry/imports
+      - ${AI_SETTINGS_KEY_FILE:-./deploy/empty-secret.example}:/run/secrets/ai_settings_key:ro
       - ${MANAGED_LIBRARY_HOST_PATH:-pantry_managed_library}:/var/lib/print-pantry/managed
     read_only: true
     tmpfs:

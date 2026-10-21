@@ -2,6 +2,13 @@ import { relations, sql } from 'drizzle-orm';
 import { bigint, check, customType, index, integer, jsonb, pgSequence, pgTable, text, timestamp, uniqueIndex, uuid, varchar, type AnyPgColumn } from 'drizzle-orm/pg-core';
 
 export const projectIdSequence = pgSequence('project_id_seq');
+export const siteAiSettings = pgTable('site_ai_settings', {
+  id: text('id').primaryKey(),
+  revision: integer('revision').notNull().default(0),
+  configuration: jsonb('configuration').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [check('site_ai_settings_singleton_check', sql`${table.id} = 'site'`)]);
+
 const projectIdType = customType<{ data: string; driverData: string }>({
   dataType: () => 'bigint',
   fromDriver: (value) => String(value),

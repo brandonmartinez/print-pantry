@@ -1,10 +1,14 @@
 import { useDeferredValue, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, File, Folder, FolderOpen, ListChecks, RefreshCw, Save, Search } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronDown, ChevronRight, File, Folder, FolderOpen, ListChecks, RefreshCw, RotateCcw, Save, Search, Sparkles } from 'lucide-react';
 import type { LegacyImportEntry, LegacyImportProject, LegacyImportSession, LegacyImportSessions } from '@print-pantry/contracts';
 import { LibraryFileSize } from './LibraryFileSize.js';
+import { AiOrganization } from './AiOrganization.js';
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
+type AiProject = NonNullable<LegacyImportSession['aiProposal']>['projects'][number];
+type AiChoices = { requestId: string; fileIds: string[]; metadataKeys: string[] };
+type ChooseAi = (kind: 'fileIds' | 'metadataKeys', key: string, selected: boolean) => void;
 const contains = (parent: string, path: string) => !parent || parent === path || path.startsWith(`${parent}/`);
 const flatten = (tree: LegacyImportEntry[]): LegacyImportEntry[] => tree.flatMap((entry) => [entry, ...flatten(entry.children)]);
 const message = (reason: unknown) => reason instanceof Error ? reason.message : 'Import failed. Try again.';
@@ -42,15 +46,17 @@ function SourceTree({ tree, roots, issues, busy, search, choose }: {
   return <ul className="legacy-tree" aria-label="Legacy folders">{tree.map(branch)}</ul>;
 }
 
-function ProjectOrganization({ project, busy, readOnly, onSave, onDirty }: {
+function ProjectOrganization({ project, busy, readOnly, onSave, onDirty, aiProject, aiChoices, aiDisabled, onAiChoice }: {
   project: LegacyImportProject; busy: boolean; readOnly: boolean;
   onSave: (project: LegacyImportProject, name: string, category: string, paths: { id: string; path: string }[]) => Promise<void>;
   onDirty: (key: string, dirty: boolean) => void;
+  aiProject?: AiProject; aiChoices: AiChoices; aiDisabled: boolean; onAiChoice: ChooseAi;
 }) {
   const [name, setName] = useState(project.name);
   const [category, setCategory] = useState(project.category ?? '');
   const [paths, setPaths] = useState(project.files.map(({ id, path }) => ({ id, path })));
   const dirty = name !== project.name || category !== (project.category ?? '') || paths.some((file, index) => file.path !== project.files[index]?.path);
+  const metadataChanged = aiProject && (aiProject.name !== project.name || aiProject.category !== project.category);
   useEffect(() => { onDirty(project.key, dirty); }, [project.key, dirty, onDirty]);
   async function save() { await onSave(project, name, category, paths); }
   return <article className="legacy-project" aria-label={`${project.sourcePath || 'Library'} organization`}>
@@ -62,14 +68,32 @@ function ProjectOrganization({ project, busy, readOnly, onSave, onDirty }: {
       <label>Category<input aria-label={`Category for ${project.sourcePath}`} value={category} maxLength={512}
         disabled={busy || readOnly} onChange={(event) => setCategory(event.target.value)} /></label>
     </div>
+    {metadataChanged && <label className="ai-metadata-choice"><input type="checkbox" checked={aiChoices.metadataKeys.includes(project.key)} disabled={aiDisabled}
+      aria-label={`Use AI project details for ${project.sourcePath}`} onChange={(event) => onAiChoice('metadataKeys', project.key, event.target.checked)} />
+      <span><Sparkles size={14} /> {aiProject.category || 'Uncategorized'} / {aiProject.name}</span></label>}
     {project.warnings.map((warning) => <p className="small-note" key={warning}>{warning}</p>)}
     {project.blockers.map((blocker) => <p className="notice notice-error" role="alert" key={blocker}>{blocker}</p>)}
-    <details className="legacy-files"><summary>Files ({project.files.length})</summary>
-      <ul>{project.files.map((file, index) => <li key={file.id}>
-        <span className="legacy-path">{file.originalPath}</span><ArrowRight size={16} />
-        <input aria-label={`Destination for ${file.originalPath} in ${project.sourcePath}`} value={paths[index]?.path ?? file.path}
-          disabled={busy || readOnly || project.linked} onChange={(event) => setPaths((current) => current.map((item) => item.id === file.id ? { ...item, path: event.target.value } : item))} />
-      </li>)}</ul>
+    <details className="legacy-files" open={Boolean(aiProject) || undefined}><summary>Files ({project.files.length})</summary>
+      <table className="legacy-file-table"><thead><tr><th scope="col">Source file</th><th scope="col">Current destination</th>{aiProject && <th scope="col">AI alternative</th>}</tr></thead>
+        <tbody>{project.files.map((file, index) => {
+          const proposedPath = aiProject?.paths.find((item) => item.id === file.id)?.path;
+          const changed = proposedPath !== undefined && proposedPath !== file.path;
+          const useAi = changed && aiChoices.fileIds.includes(file.id);
+          const label = `${file.originalPath} in ${project.sourcePath}`;
+          return <tr key={file.id}><td data-label="Source file"><span className="legacy-path">{file.originalPath}</span></td>
+            <td data-label="Current destination" className={changed && !useAi ? 'is-chosen' : undefined}>
+              {changed && <label className="ai-destination-choice"><input type="radio" name={`destination-${project.key}-${file.id}`} checked={!useAi} disabled={aiDisabled}
+                aria-label={`Keep current destination for ${label}`} onChange={() => onAiChoice('fileIds', file.id, false)} /><span>Current</span></label>}
+              <textarea rows={1} aria-label={`Destination for ${label}`} value={paths[index]?.path ?? file.path}
+                disabled={busy || readOnly || project.linked} onChange={(event) => setPaths((current) => current.map((item) => item.id === file.id ? { ...item, path: event.target.value } : item))} />
+            </td>
+            {aiProject && <td data-label="AI alternative" className={useAi ? 'is-chosen' : undefined}>{changed && <label className="ai-destination-choice">
+              <input type="radio" name={`destination-${project.key}-${file.id}`} checked={useAi} disabled={aiDisabled}
+                aria-label={`Use AI destination for ${label}`} onChange={() => onAiChoice('fileIds', file.id, true)} /><span className="legacy-path">{proposedPath}</span>
+            </label>}</td>}
+          </tr>;
+        })}</tbody>
+      </table>
     </details>
     {dirty && !readOnly && <button type="button" className="button button-outline" disabled={busy || !name.trim()} onClick={() => void save()}><Save size={16} /> Save changes</button>}
   </article>;
@@ -83,12 +107,14 @@ export function LibraryImport({ request }: { request: Request }) {
   const [loading, setLoading] = useState(true);
   const [loadRevision, setLoadRevision] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const deferredSearch = useDeferredValue(search.trim().toLowerCase());
   const [replacement, setReplacement] = useState<string | null>(null);
   const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(new Set());
   const [creationId, setCreationId] = useState(() => crypto.randomUUID());
+  const [selectedAi, setSelectedAi] = useState<AiChoices>({ requestId: '', fileIds: [], metadataKeys: [] });
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setError(''); setSession(null); setDirtyKeys(new Set());
@@ -148,10 +174,21 @@ export function LibraryImport({ request }: { request: Request }) {
   const selected = session ? flatten([session.tree]).filter((entry) => session.selectedRoots.includes(entry.path)) : [];
   const selectedFiles = selected.reduce((total, entry) => total + entry.fileCount, 0);
   const blocked = session?.projects.some((project) => project.blockers.length > 0);
+  const proposal = session?.state === 'planned' && session.aiProposal?.status === 'ready' ? session.aiProposal : null;
+  const aiChoices: AiChoices = proposal && selectedAi.requestId === proposal.requestId ? selectedAi : { requestId: proposal?.requestId ?? '', fileIds: [], metadataKeys: [] };
+  const aiDifferences = proposal?.projects.map((proposed) => ({ proposed, current: session!.projects.find((project) => project.key === proposed.key)! }));
+  const changedFiles = aiDifferences?.flatMap(({ proposed, current }) => proposed.paths.filter((file) => file.path !== current.files.find((item) => item.id === file.id)?.path).map((file) => file.id)) ?? [];
+  const changedMetadata = aiDifferences?.filter(({ proposed, current }) => proposed.name !== current.name || proposed.category !== current.category).map(({ proposed }) => proposed.key) ?? [];
+  const selectedCount = aiChoices.fileIds.length + aiChoices.metadataKeys.length;
+  const aiDisabled = busy || aiBusy || dirtyKeys.size > 0;
+  const chooseAi: ChooseAi = (kind, key, selected) => setSelectedAi((current) => {
+    const choices = current.requestId === proposal?.requestId ? current : aiChoices;
+    return { ...choices, [kind]: selected ? [...new Set([...choices[kind], key])] : choices[kind].filter((item) => item !== key) };
+  });
   return <section className="legacy-import" aria-labelledby="legacy-import-title">
     <Link className="back-link" to="/manage-library"><ArrowLeft size={16} /> Manage library</Link>
     <header className="legacy-heading"><div><h1 id="legacy-import-title">Import library</h1><p className="quiet">{session ? labels[session.state] : 'Legacy folders'}</p></div>
-      {session && <button type="button" className="legacy-icon-button" title="Refresh import" aria-label="Refresh import" disabled={busy || dirtyKeys.size > 0}
+      {session && <button type="button" className="legacy-icon-button" title="Refresh import" aria-label="Refresh import" disabled={busy || aiBusy || dirtyKeys.size > 0}
         onClick={() => { setBusy(true); void request<LegacyImportSession>(`/api/library/imports/${session.id}`).then(setSession).catch((reason: unknown) => setError(message(reason))).finally(() => setBusy(false)); }}><RefreshCw size={18} /></button>}
     </header>
     <ol className="legacy-steps" aria-label="Import progress">{['Choose projects', 'Organize', 'Review'].map((label, index) => <li key={label}
@@ -185,13 +222,23 @@ export function LibraryImport({ request }: { request: Request }) {
     </> : <>
       <div className="legacy-organization-heading"><div><h2>{organized ? 'Files organized' : `${session.projects.length} ${session.projects.length === 1 ? 'project' : 'projects'}`}</h2>
         <p className="quiet">{organized ? 'Recovery copies verified. Files are staged; the live library is unchanged.' : preparing ? `${session.projects.filter((project) => project.status === 'organized').length} of ${session.projects.length} prepared` : 'Recovery copies will be verified before organization.'}</p></div>
-        {!organized && !preparing && <button type="button" className="button button-primary" disabled={busy || blocked || dirtyKeys.size > 0} onClick={() => void command('organize')}>{session.state === 'failed' ? 'Retry preparation' : 'Prepare files'} <ArrowRight size={16} /></button>}
+        {!organized && !preparing && <button type="button" className="button button-primary" disabled={busy || aiBusy || blocked || dirtyKeys.size > 0 || selectedCount > 0} onClick={() => void command('organize')}>{session.state === 'failed' ? 'Retry preparation' : 'Prepare files'} <ArrowRight size={16} /></button>}
       </div>
       {session.lastError && <p className="notice notice-error" role="alert">{session.lastError}</p>}
       {preparing && <p role="status">Preparing files…</p>}
       {dirtyKeys.size > 0 && <p className="small-note" role="status">Save project changes before preparing files.</p>}
-      {session.projects.map((project) => <ProjectOrganization key={JSON.stringify([session.id, project.key, project.name, project.category, project.files.map((file) => file.path)])} project={project} busy={busy} readOnly={session.state !== 'planned'} onSave={save} onDirty={markDirty} />)}
-      <div className="library-management-actions">{session.state === 'planned' && <button type="button" className="button button-quiet" disabled={busy || dirtyKeys.size > 0} onClick={() => void command('selection', { roots: session.selectedRoots, layout: session.layout })}><ArrowLeft size={16} /> Choose projects</button>}
+      {session.state === 'planned' && <AiOrganization key={session.id} session={session} request={request} disabled={busy || dirtyKeys.size > 0} onSession={setSession} onBusyChange={setAiBusy} />}
+      {proposal && <div className="ai-review-toolbar" aria-label="AI change selection">
+        <p className="small-note" role="status">{changedFiles.length + changedMetadata.length === 0 ? 'No AI changes.' : `${changedFiles.length} file alternatives, ${changedMetadata.length} project detail changes. ${selectedCount} selected.`}</p>
+        <div className="library-management-actions">
+          <button className="button button-outline" type="button" disabled={aiDisabled || !changedFiles.length && !changedMetadata.length} onClick={() => setSelectedAi({ requestId: proposal.requestId, fileIds: changedFiles, metadataKeys: changedMetadata })}><ListChecks size={16} /> Select all AI changes</button>
+          <button className="button button-quiet" type="button" disabled={aiDisabled || !selectedCount} onClick={() => setSelectedAi({ requestId: proposal.requestId, fileIds: [], metadataKeys: [] })}><RotateCcw size={16} /> Keep all current</button>
+          <button className="button button-primary" type="button" disabled={aiDisabled || !selectedCount} onClick={() => void command('ai/apply', { requestId: proposal.requestId, selection: { fileIds: aiChoices.fileIds, metadataKeys: aiChoices.metadataKeys } })}><Check size={16} /> Apply selected changes</button>
+        </div>
+      </div>}
+      {session.projects.map((project) => <ProjectOrganization key={JSON.stringify([session.id, project.key, project.name, project.category, project.files.map((file) => file.path)])} project={project} busy={busy || aiBusy} readOnly={session.state !== 'planned'} onSave={save} onDirty={markDirty}
+        aiProject={proposal?.projects.find((item) => item.key === project.key)} aiChoices={aiChoices} aiDisabled={aiDisabled} onAiChoice={chooseAi} />)}
+      <div className="library-management-actions">{session.state === 'planned' && <button type="button" className="button button-quiet" disabled={busy || aiBusy || dirtyKeys.size > 0} onClick={() => void command('selection', { roots: session.selectedRoots, layout: session.layout })}><ArrowLeft size={16} /> Choose projects</button>}
         {organized && <Link className="button button-outline" to="/import-library" onClick={() => setCreationId(crypto.randomUUID())}>Another import</Link>}</div>
     </>}
   </section>;

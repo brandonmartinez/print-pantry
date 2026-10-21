@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { validateStorage } from './import-storage.js';
 import { createLibraryAdoptionRunner } from './library-adoption.js';
 import { createLegacyImportRunner } from './library-import.js';
+import { loadAiEncryptionKey } from './ai-secrets.js';
 
 const pool = createPool(process.env.DATABASE_URL ?? '');
 if (process.env.LIBRARY_ROOT) throw new Error('LIBRARY_ROOT was renamed to LEGACY_LIBRARY_ROOT and is migration-only; update the container configuration');
@@ -36,6 +37,7 @@ const intakeRoot = process.env.IMPORT_STORAGE_ROOT || (developmentStorage && joi
 const managedRoot = process.env.MANAGED_LIBRARY_ROOT || (developmentStorage && join(developmentStorage, 'library'));
 if (!intakeRoot || !managedRoot) throw new Error('IMPORT_STORAGE_ROOT and MANAGED_LIBRARY_ROOT must both be configured');
 const importStorage = { intakeRoot, managedRoot };
+const encryptionKey = await loadAiEncryptionKey(process.env.AI_SETTINGS_KEY_FILE || (developmentStorage && join(developmentStorage, 'ai-settings.key')), Boolean(developmentStorage));
 await validateStorage(importStorage, root);
 const indexer = root ? createLibraryIndexer({
   db: createDatabase(pool), root, ignoredDirectoryNames,
@@ -49,7 +51,7 @@ const server = buildServer(pool, {
   indexer, read3mfGeometry: read3mfGeometryFromHandle,
   read3mfThumbnail: read3mfThumbnailFromHandle, secureCookie: cookieSecure === 'true',
   managedRoot, managedClientMountPrefix: process.env.MANAGED_CLIENT_MOUNT_PREFIX,
-  importStorage,
+  importStorage, ai: { encryptionKey },
 }, publicOrigin);
 const adoption = createLibraryAdoptionRunner(pool, { pool, root, managedRoot, indexer }, server.log);
 const legacyImports = createLegacyImportRunner(pool, { root, importStorage, ignoredDirectories: ignoredDirectoryNames }, server.log);

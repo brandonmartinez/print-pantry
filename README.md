@@ -64,7 +64,12 @@ Operators can open **Manage library > Import library** (`/import-library`) to
 select project roots from a searchable folder tree, review editable categories
 and file paths, and prepare verified recovery and organized intake copies.
 Selections and edits persist across reloads; no prior catalog scan is required.
-This checkpoint stops at staging, before AI integration or live publication.
+Optional **AI organization** adds a separately reviewed proposal before staging.
+Operators configure OpenAI or GitHub Copilot SDK profiles, account models, and a
+site default at **AI settings** (`/settings/ai`). Credentials remain encrypted
+server-side; inventory sharing requires consent, and render sharing is off by
+default. Deterministic imports require no provider. This flow still stops at
+staging, before live publication.
 See the [guided import checkpoint](docs/import-queue.md#guided-legacy-library-import)
 for recovery paths, limits, and shared agent APIs.
 

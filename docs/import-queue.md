@@ -86,9 +86,83 @@ page lists recent sessions; **Browse folders** explicitly starts discovery.
    the saved `?session=...` URL to resume or observe progress.
 
 **Files organized** is the stopping point: this flow does not create live
-catalog entries or managed projects. AI, publication, and activation are not
-implemented here. Advanced adoption remains separate and does not consume these
+catalog entries or managed projects. Optional AI suggestions happen before file
+preparation; publication and activation are not implemented here. Advanced adoption remains separate and does not consume these
 organized staging copies. No original files are changed or automatically purged.
+
+### Optional AI organization
+
+Before **Prepare files**, choose **AI organization**. Without a configured
+default, this opens **AI settings** with the import session retained in the
+return link. Already prepared sessions remain immutable; start another import
+to try a different organization.
+
+1. Add an OpenAI or GitHub Copilot SDK provider profile. Save its credential,
+   refresh account models, select and save a model, then choose the site default.
+   Multiple profiles are supported (up to eight). All settings are operator-only
+   and site-wide. Saved credentials are never returned to the browser.
+2. Set per-request input-character and output-token limits. Account discovery
+   is not a guarantee that every OpenAI model supports structured Responses;
+   unsupported requests fail without changing the plan. Copilot reports image
+   capabilities; OpenAI's model list does not, so image support requires explicit
+   operator confirmation. Replacing credentials clears cached models/defaults.
+3. Optionally expand **Preview selected models** for STL/3MF geometry. This reads
+   selected source files locally without sending them to a provider. With image
+   sharing enabled for the selected model, the camera button attaches the current
+   view as PNG. Review/remove attached thumbnails before sharing. At most three
+   images, each up to 1024 pixels and approximately 1 MB, are accepted; browser
+   captures are capped at 768 pixels. No image is sent automatically.
+4. Choose a **Proposal provider** (the site default is preselected). This choice
+   does not change the site default. Switching providers clears attached renders
+   and requires sharing consent again. Approve sharing, then generate a proposal.
+   Preparation and manual edits are locked while the request runs. Only selected project
+   roots, titles, categories, relative file names, sizes, current destinations,
+   immutable IDs, and attached renders are sent. No model binaries, document
+   contents, credentials, or broad library inventory are included.
+5. Review **AI alternative** beside each current file destination. Only changed
+   destinations have an alternative; current destinations are selected initially.
+   Choose current or AI per file, or **Select all AI changes**. Changed project
+   titles/categories have a separate opt-in; bulk selection includes these too.
+   **Keep all current** clears the choices. **Apply selected changes** validates
+   the combined destinations atomically and updates only those choices. A mixed
+   selection with collisions leaves the saved plan and proposal unchanged.
+   Apply or clear pending choices before preparing files. Only the saved plan
+   changes; nothing is copied or published by accepting AI changes.
+
+Requests and results persist in the import snapshot. Replaying a request ID
+returns the saved result without inference, including failures. Pending requests
+after a process crash are not automatically retried; a deliberately new request
+can incur another charge. There are at most 20 distinct AI requests per session,
+no automatic SDK retries, and a 90-second request timeout. These limits are not
+a currency spending cap; configure provider-side budgets too. Invalid output,
+timeouts and provider failures retain the deterministic/current plan. Manual
+edits or selection changes invalidate the current suggestion. Proposals cannot
+drop/add files, change extensions, break linked layouts, or escape portable
+destination paths. Project split/merge, tags, document enrichment, and exact
+reference-script parity remain outside this checkpoint.
+
+The AI prompt prioritizes filename sanitization and keeps valid destinations
+unchanged. Evidence-backed corrections must use the standard models/images/docs/
+exports buckets and recognized root sidecars, preserving meaningful variants.
+It discourages invented taxonomy and archive/link/format-only folders; uncertain
+files stay put. Linked projects and keep-layout choices override all path edits.
+These filing instructions guide the model; existing validation enforces identity,
+extension, protected-layout and portable-path safety, not semantic classification.
+
+Provider adapters disable agent tools and instruction discovery. Copilot runs
+in a disposable directory with separately configured credentials and no editor
+login or inherited application secrets. Provider retention and billing policies
+still apply; OpenAI Responses use `store: false`, not a claim of zero retention.
+
+API additions (all operator-only): `GET /api/admin/ai`,
+`PUT /api/admin/ai/providers/:id`, `POST /api/admin/ai/providers/:id/models`,
+`DELETE /api/admin/ai/providers/:id`, `PUT /api/admin/ai/default`,
+`POST /api/library/imports/:id/ai` (`expectedRevision`, `requestId`, `images`,
+optional `providerId` to override the site default),
+`POST /api/library/imports/:id/ai/apply` (`expectedRevision`, `requestId`, optional
+`selection: {fileIds, metadataKeys}`; omission accepts the entire proposal), and
+`GET /api/library/imports/:id/files/:fileId/geometry`. Settings mutations use
+`expectedRevision` too. Images are `{fileId, data}` with base64 PNG bytes.
 
 Discovery limits: 20,000 entries, 10,000 files, 24 levels. Batch limits: 100
 project roots, 20 GiB of selected bytes. Destination paths also obey intake

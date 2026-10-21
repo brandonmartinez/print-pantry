@@ -11,10 +11,12 @@ import { registerLibraryManagement } from './library-management.js';
 import { libraryMigrationForPlan, registerLibraryMigrations } from './library-migrations.js';
 import { registerLibraryAdoption } from './library-adoption.js';
 import { registerLegacyImports } from './library-import.js';
+import { createAiSettingsService, registerAiSettings, type AiSettingsOptions } from './ai-settings.js';
+import { listAiModels } from './ai-providers.js';
 
 export function buildServer(
   pool: { query(sql: string): Promise<unknown> },
-  catalog?: CatalogOptions & { secureCookie: boolean; importStorage?: ImportStorage },
+  catalog?: CatalogOptions & { secureCookie: boolean; importStorage?: ImportStorage; ai?: Partial<AiSettingsOptions> },
   publicOrigin?: string,
 ) {
   const server = Fastify({ logger: true });
@@ -44,6 +46,8 @@ export function buildServer(
 
   if (catalog) {
     const auth = createAuth(server, catalog.pool, catalog.secureCookie);
+    const ai = createAiSettingsService(catalog.pool, { listModels: listAiModels, ...catalog.ai });
+    registerAiSettings(server, ai, auth);
     registerCatalog(server, catalog, auth);
     registerRequests(server, catalog.pool, auth);
     registerImports(server, catalog.pool, auth);
@@ -53,6 +57,7 @@ export function buildServer(
     registerLibraryMigrations(server, catalog.pool, auth, catalog);
     registerLibraryAdoption(server, catalog.pool, auth, catalog);
     registerLegacyImports(server, catalog.pool, auth, { root: catalog.root, importStorage: catalog.importStorage,
+      ai, read3mfGeometry: catalog.read3mfGeometry,
       ignoredDirectories: (process.env.LEGACY_LIBRARY_IGNORED_DIRS ?? '').split(',').map((name) => name.trim()).filter(Boolean) });
   }
 
