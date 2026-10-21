@@ -149,6 +149,50 @@ export interface LibraryAdoptionItems {
   nextCursor: string | null;
 }
 
+export interface LegacyImportEntry {
+  path: string;
+  name: string;
+  kind: 'directory' | 'file';
+  fileCount: number;
+  modelCount: number;
+  sizeBytes: number;
+  suggested: boolean;
+  evidence: string[];
+  children: LegacyImportEntry[];
+}
+
+export interface LegacyImportProject {
+  key: string;
+  sourcePath: string;
+  name: string;
+  category: string | null;
+  status: 'planned' | 'organized';
+  linked: boolean;
+  directories: string[];
+  files: Array<{ id: string; originalPath: string; path: string; size: number; hash: string | null }>;
+  warnings: string[];
+  blockers: string[];
+}
+
+export interface LegacyImportSession {
+  id: string;
+  revision: number;
+  state: 'selecting' | 'planned' | 'organizing' | 'organized' | 'failed';
+  createdAt: string;
+  updatedAt: string;
+  tree: LegacyImportEntry;
+  selectedRoots: string[];
+  layout: 'standardize' | 'preserve';
+  projects: LegacyImportProject[];
+  issues: Array<{ path: string; message: string }>;
+  lastError: string | null;
+}
+
+export interface LegacyImportSessions {
+  configured: boolean;
+  sessions: Array<Pick<LegacyImportSession, 'id' | 'state' | 'updatedAt'> & { projectCount: number }>;
+}
+
 export interface ReadinessResponse {
   status: 'ready' | 'unavailable';
 }

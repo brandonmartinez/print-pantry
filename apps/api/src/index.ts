@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { validateStorage } from './import-storage.js';
 import { createLibraryAdoptionRunner } from './library-adoption.js';
+import { createLegacyImportRunner } from './library-import.js';
 
 const pool = createPool(process.env.DATABASE_URL ?? '');
 if (process.env.LIBRARY_ROOT) throw new Error('LIBRARY_ROOT was renamed to LEGACY_LIBRARY_ROOT and is migration-only; update the container configuration');
@@ -51,6 +52,7 @@ const server = buildServer(pool, {
   importStorage,
 }, publicOrigin);
 const adoption = createLibraryAdoptionRunner(pool, { pool, root, managedRoot, indexer }, server.log);
+const legacyImports = createLegacyImportRunner(pool, { root, importStorage, ignoredDirectories: ignoredDirectoryNames }, server.log);
 const port = Number(process.env.API_PORT ?? 3000);
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('API_PORT must be a valid TCP port');
@@ -59,6 +61,7 @@ let closing: Promise<void> | undefined;
 const close = async () => {
   if (closing) return closing;
   closing = (async () => {
+  await legacyImports.stop();
   await adoption.stop();
   await server.close();
   await pool.end();
@@ -77,6 +80,7 @@ process.once('SIGINT', shutdown);
 try {
   await server.listen({ host: '0.0.0.0', port });
   adoption.start();
+  legacyImports.start();
 } catch (error) {
   server.log.error(error);
   await close();

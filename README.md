@@ -60,7 +60,15 @@ before forwarding to Fastify.
 
 ## Library catalog and household access
 
-Operators can use **Manage library** for paginated legacy/managed inventory and
+Operators can open **Manage library > Import library** (`/import-library`) to
+select project roots from a searchable folder tree, review editable categories
+and file paths, and prepare verified recovery and organized intake copies.
+Selections and edits persist across reloads; no prior catalog scan is required.
+This checkpoint stops at staging, before AI integration or live publication.
+See the [guided import checkpoint](docs/import-queue.md#guided-legacy-library-import)
+for recovery paths, limits, and shared agent APIs.
+
+The **Advanced migration tools** disclosure retains paginated legacy/managed inventory and
 saved reorganization dry runs. Previews preserve existing project IDs and
 internal file layout, flag filesystem/storage blockers, and do not move or
 activate files. A separately approved migration copies and freshly verifies each
@@ -323,6 +331,16 @@ transfer accounts or data from the previous volume. The old volume remains
 untouched. `npm run dev` applies migrations and seeds the development account
 as described above. Tests still target the separate `print_pantry_test` database.
 Uploads remain in workspace `.pantry-data/intake`, outside these three folders.
+
+For this disposable development rehearsal, the database and managed-library
+output may be reset together and rebuilt by importing the unchanged legacy
+fixture. Preserve the legacy fixture; it is the repeatable input, not reset
+output. Verify the configured targets are the designated local test storage
+before each reset, and do not extend this permission to production, shared
+storage, or changed/unverified paths. Stop workers first, account for retained
+intake/recovery state outside these folders, and stop PostgreSQL before touching
+its physical data directory. A reset deletes development accounts and catalog
+history; startup migrations and development seeding recreate only initial state.
 
 For a reversible filesystem checkpoint, stop the app **and PostgreSQL** before
 copying database data. Capture the database, managed library, and intake storage

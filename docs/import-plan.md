@@ -31,6 +31,15 @@ restoration. Initialization and CLI controls now use this backend rather than
 independent file-moving scripts. Both require an existing catalog scan and
 configured permanent storage; neither automatically adopts a real library.
 
+The guided legacy-import checkpoint is implemented through deterministic
+organization: a searchable checkbox tree with suggested project roots, saved
+selections, editable categories and file paths, verified recovery copies, and
+organized intake staging. The UI and authenticated agent clients use the same
+revision-checked APIs; no prior catalog scan is required. The current steps are
+Choose projects, Organize, and Review. AI integration and live publication remain
+future work. Older adoption controls remain under Advanced migration tools.
+See [the checkpoint guide](import-queue.md#guided-legacy-library-import).
+
 ## Recommendation
 
 Treat library management and the print queue as primary product capabilities.
@@ -48,9 +57,12 @@ optional OpenAI-assisted suggestions remain a follow-up. Automatic site download
 separate capability: neither blocked downloads nor missing AI credentials
 should prevent importing files the operator already has.
 
-Existing folders remain supported without mandatory conversion. Add an
-explicit, previewable **Reorganize library** operation to adopt app-managed
-storage safely. No automatic slicing or printing.
+Provide **Import library** to discover and review projects in an existing
+read-only library, capture its useful hierarchy as metadata, and copy approved
+projects into managed storage. Offer reviewed internal standardization before
+publication, with preservation of existing layout as an alternative. Legacy
+files do not serve the normal catalog until activation. No automatic slicing
+or printing.
 
 ## What the current implementation and scripts tell us
 
@@ -107,6 +119,64 @@ Later adapters automate file acquisition without replacing this workflow.
 Add an operator **Manage library** area for metadata editing, category/tag and
 collection management, source/duplicate review, storage health, and migration
 jobs. Metadata-only bulk edits must not trigger physical reorganization.
+
+### Import library: guided decisions
+
+The full target flow follows. The implemented checkpoint ends at organized
+staging, before AI integration and live-library publication.
+
+Use one straightforward operator flow rather than exposing the existing scan,
+preview, migration, and journal internals as competing tools:
+
+1. **Choose projects:** show an expandable, searchable source file tree with
+  checkboxes for project roots. Suggest likely roots using model files,
+  README/license/source sidecars, and nested model/variant folders together;
+  folder depth or a README alone is insufficient. Suggestions are not approval.
+  Let the operator choose a different parent, select individual child projects,
+  or leave content unselected when automatic grouping is uncertain.
+2. **Organize:** propose readable titles, categories, and safe file organization.
+  Allow deterministic normalization, optional AI suggestions, or preserving the
+  existing layout. All choices operate on a proposed managed copy, not the source.
+3. **Review:** show project names, proposed categories, selected file counts and
+  sizes, and only issues requiring a decision. Open an individual project to
+  inspect or edit its before/after file tree and metadata. Do not require users
+  to read a full technical inventory to continue.
+4. **Import:** verify recovery snapshots, copy and hash-verify approved content,
+  then activate explicitly and report imported projects or actionable failures.
+  Preserve the existing separate copy and activation approvals; present each
+  when relevant, not as permanently expanded control panels.
+
+A checked folder means one project including its nested files, not every
+descendant as another project. Selected project roots must not overlap. Choosing
+children instead of a selected parent requires an explicit selection change;
+never silently merge projects, split variants, or drop supporting files. Warn
+when a candidate appears to contain multiple independent projects. Discovery
+must account for unselected files without forcing their inclusion or pretending
+they were imported. Support keyboard navigation, labeled checkboxes, and
+on-demand tree expansion so large libraries remain usable.
+
+Preserve the full original project-relative path, ancestor hierarchy, and
+discovery evidence as provenance. Propose editable category/subcategory metadata
+from the ancestors without assuming a fixed number of category levels. Keep
+variant folders within their project rather than treating them as categories.
+Metadata corrections must not move physical managed paths.
+
+Persist discovery and selection decisions across reloads. The UI and authenticated
+agent/CLI clients must use the same discovery, selection, planning, and import
+APIs. Accept configured source identifiers and validated relative paths, not
+arbitrary host paths. Agent-assisted boundary decisions remain proposals subject
+to the same ownership, overlap, inventory, and approval checks.
+
+### UI simplicity
+
+Default screens show the current task, concise progress, the next action, and
+decisions that affect the result. Avoid repeated explanatory paragraphs,
+permanent warning banners, stacked administrative panels, and raw diagnostic
+tables. Hashes, fingerprints, internal states, journals, and detailed path
+mappings belong in optional details or troubleshooting views. Keep blocking
+errors and material warnings visible in plain language; never hide a required
+decision to make the screen appear simpler. Backend safety checks remain
+mandatory even when their diagnostic output is not shown by default.
 
 ## 2. Site adapters and MakerWorld identity
 
@@ -233,20 +303,28 @@ Port the useful rules from the organizer into testable TypeScript:
   interoperability. Resolve conflicts in the review plan, never by overwriting.
 
 Do not rewrite model contents or rename files inside 3MF containers. File
-normalization applies to incoming files; migration preserves existing project
-internals by default. Reclassification only changes database metadata.
+normalization applies to incoming files and to explicitly selected legacy-import
+standardization. Existing copy-only migration preserves internal layout; the
+new Import library flow offers a reviewed normalization plan before publication,
+not an implicit mutation of the source. Reclassification only changes database
+metadata.
 
 ### AI-assisted mode: optional enrichment
 
-Initially support a server-configured OpenAI API key. Keep credentials in
-deployment secrets/environment, never in the browser, manifests, logs, or chat.
-No key is needed to develop or use deterministic imports.
+Provide a configurable suggestion-provider boundary for OpenAI and GitHub
+Copilot. Direct OpenAI integration is the first implementation option; Copilot
+requires a separately authenticated SDK runtime. Let operators configure the
+provider, credentials, model, and usage limits without editing import plans.
+Keep credentials in server-side secrets or encrypted storage with a separately
+managed encryption key. Do not expose saved credentials to the browser or write
+them to manifests, logs, or chat. No key is needed for deterministic imports.
 
 With explicit opt-in, send only approved, bounded, non-sensitive descriptive
 metadata needed for suggestions; no model binaries or broad library contents.
 Show the data-sharing scope and impose request/token/time limits.
 
-AI may suggest translations, clearer names, categories, and tags. It must not
+AI may suggest project boundaries, translations, clearer names, categories,
+tags, and dependency-safe relative folder restructuring. It must not
 invent attribution, licensing, identities, or technical specifications.
 Treat documentation as data, not instructions. Give the model no shell,
 filesystem, or download tools. Validate all suggestions against the same
@@ -386,10 +464,12 @@ its MTL, and referenced textures together instead of moving those textures
 into `images/`. Preserve native CAD assemblies and similar linked resources
 as groups. Never unpack/reorganize the internal contents of 3MF files.
 
-The new-import organizer targets this layout. Legacy migration adopts the
-stable top-level project directory and manifest but preserves existing internal
-layout by default. Offer internal standardization as a separately reviewable
-plan using the same dependency/path validation, not an implicit migration step.
+The organizer targets this layout for new uploads and for legacy imports when
+standardization is selected. Existing copy-only migration preserves internal
+layout. Integrate internal standardization into the guided Import library flow
+as an explicit, reviewable choice before copying, using the same dependency/path
+validation. Preserve-layout remains available; never silently transform source
+folders or reapply organization to an already approved plan.
 
 ### Original source recovery
 
@@ -397,6 +477,16 @@ Retain original source material outside the active project and scanner roots,
 associated with the import job and project ID. A ZIP upload is retained
 byte-for-byte; for individual-file uploads, retain original bytes and supplied
 relative paths. Preserve multiple acquisition batches separately.
+
+For legacy import, create a job-owned recovery snapshot before transformation
+or publication. Preserve original file bytes, relative names, directory structure
+(including empty directories), and relevant catalog metadata. Record file hashes
+and the original-to-managed mapping; verify the snapshot against the frozen
+inventory before allowing publication. Store recovery material outside the active
+managed project and scanner roots, without deleting or modifying the read-only
+legacy source. A retained source path or mapping alone is not a recovery snapshot.
+An independent backup still requires a separate storage/failure domain and the
+corresponding database backup; a local recovery copy does not replace that.
 
 Record checksums, acquisition/source metadata, and original-to-organized path
 mapping in a versioned recovery manifest. Validate archive paths before
@@ -458,6 +548,16 @@ implements this data-preserving migration, so a reset/reseed is unnecessary.
 Any future reset would require a verified disposable target and explicit
 execution approval; never reset an external/shared database or delete library
 files. Filesystem migration after the schema transition preserves the new IDs.
+
+For the explicitly designated local rehearsal, the configured development
+database and managed-library destination are disposable and may be reset to test
+fresh imports and recovery scenarios. Rebuild both from the unchanged read-only
+legacy fixture. This permission does not extend to the legacy fixture itself,
+other libraries, production/shared databases, or newly configured unverified
+paths. Stop workers before resetting catalog/storage together, and stop
+PostgreSQL before any physical data-directory operation. Account for retained
+intake/recovery jobs so a reset cannot reuse stale state against a fresh catalog.
+See the README's local storage rehearsal section for mount and checkpoint rules.
 
 Make storage roots and project locations explicit database concepts, distinct
 from logical categories. Adapt existing unique path constraints, download and

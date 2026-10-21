@@ -153,9 +153,11 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
     if (path === '/api/auth/login') return jsonResponse({ user: { id: 'u-1', username: 'maker', role } });
     if (path === '/api/auth/logout') return jsonResponse(undefined, 204);
     if (path.startsWith('/api/imports?')) return jsonResponse({ items: [], page: 1, pageSize: 12, total: 0 });
+    if (path === '/api/library/imports') return jsonResponse({ configured: true, sessions: [] });
     if (path.startsWith('/api/library/management?')) return jsonResponse({
       items: [], total: 0, page: 1, pageSize: 50, summary: { legacy: 0, managed: 0, missing: 0 }, plans: [],
     });
+    if (path === '/api/library/legacy-scan') return jsonResponse({ configured: false, scan: { state: 'never', lastError: null, errors: [] } });
     if (path.startsWith('/api/catalog/projects?')) {
       const url = new URL(path, 'http://localhost');
       const requestedPage = Number(url.searchParams.get('page'));
@@ -179,7 +181,6 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
     }
     if (path === '/api/catalog/projects/desk-organizer') return jsonResponse({ project: { ...detail, ...(options.storageKind ? { storageKind: options.storageKind } : {}), ...(options.isBoundary !== undefined ? { isBoundary: options.isBoundary } : {}) } });
     if (path === '/api/catalog/projects/desk-organizer' && method === 'PATCH') return jsonResponse({ project: detail });
-    if (path === '/api/library/legacy-scan') return jsonResponse({ configured: false, scan: { state: 'never', lastError: null, errors: [] } });
     if (path === '/api/requests' && method === 'POST') return jsonResponse({ request: printRequest, revision: 1 });
     if (path === '/api/requests') {
       const request = options.sourceUnavailable ? {
@@ -204,7 +205,7 @@ function mockApi(role: 'operator' | 'requester' = 'requester', options: { queueC
 async function signIn(
   role: 'operator' | 'requester' = 'requester',
   options: { sourceUnavailable?: boolean; storageKind?: 'managed' | 'legacy'; isBoundary?: boolean } = {},
-  landingHeading = 'Browse projects',
+  landingHeading: string | null = 'Browse projects',
 ) {
   const api = mockApi(role, options);
   render(<App />);
@@ -212,7 +213,7 @@ async function signIn(
   fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'maker' } });
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pantry-pass' } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-  await screen.findByRole('heading', { name: landingHeading });
+  if (landingHeading) await screen.findByRole('heading', { name: landingHeading });
   return api;
 }
 
@@ -244,19 +245,27 @@ it('offers library management to operators and routes there without loading the 
 });
 
 it('blocks direct library-management navigation for requesters without sending operator API requests', async () => {
-  const { calls } = await signIn();
-  expect(screen.queryByRole('link', { name: 'Manage library' })).toBeNull();
-  cleanup();
   window.history.replaceState({}, '', '/manage-library');
-  const unauthorized = mockApi();
-  render(<App />);
-  await screen.findByRole('heading', { name: 'Welcome to the pantry' });
-  fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'maker' } });
-  fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pantry-pass' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  const { calls } = await signIn('requester', {}, null);
+  expect((await screen.findByRole('alert')).textContent).toContain('requires operator access');
+  expect(screen.queryByRole('link', { name: 'Manage library' })).toBeNull();
+  expect(calls.some(({ path }) => path.startsWith('/api/library/'))).toBe(false);
+});
+
+it('opens guided library import for operators without scanning automatically', async () => {
+  window.history.replaceState({}, '', '/import-library');
+  const { calls } = await signIn('operator', {}, 'Import library');
+  expect(await screen.findByRole('button', { name: 'Browse folders' })).toBeTruthy();
+  expect(calls.some(({ path }) => path === '/api/library/imports')).toBe(true);
+  expect(calls.some(({ path, init }) => path.startsWith('/api/library/') && init?.method === 'POST')).toBe(false);
+  expect(calls.some(({ path }) => path.startsWith('/api/catalog/projects?'))).toBe(false);
+});
+
+it('blocks guided library import for requesters without calling operator endpoints', async () => {
+  window.history.replaceState({}, '', '/import-library');
+  const { calls } = await signIn('requester', {}, null);
   expect((await screen.findByRole('alert')).textContent).toContain('requires operator access');
   expect(calls.some(({ path }) => path.startsWith('/api/library/'))).toBe(false);
-  expect(unauthorized.calls.some(({ path }) => path.startsWith('/api/library/'))).toBe(false);
 });
 
 it('lets household members open Add New Print and navigate to Imports', async () => {
@@ -378,6 +387,7 @@ it('provides managed metadata editing but keeps legacy indexing and boundaries o
     expect(JSON.parse(String(patch?.init?.body))).toMatchObject({ designer: 'New Designer', tags: ['organizer', 'desk'] });
   });
   expect(screen.queryByRole('button', { name: 'Set project boundary' })).toBeNull();
+  expect(calls.some(({ path }) => path === '/api/catalog/rescan' || path === '/api/catalog/boundaries')).toBe(false);
 });
 
 it('does not expose operator actions to household members', async () => {

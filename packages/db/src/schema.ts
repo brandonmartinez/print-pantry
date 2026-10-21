@@ -128,6 +128,19 @@ export const libraryMigrationProjects = pgTable('library_migration_projects', {
   check('library_migration_projects_status_check', sql`${table.status} IN ('pending','copying','copied','activated','restored','canceled')`),
 ]);
 
+export const legacyImportSessions = pgTable('legacy_import_sessions', {
+  id: uuid('id').primaryKey(),
+  createdBy: uuid('created_by').notNull().references(() => users.id),
+  snapshot: jsonb('snapshot').notNull(),
+  state: text('state').notNull().default('selecting'),
+  revision: integer('revision').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('legacy_import_updated_idx').on(table.updatedAt),
+  check('legacy_import_state_check', sql`${table.state} IN ('selecting','planned','organizing','organized','failed')`),
+]);
+
 export const libraryAdoptionRuns = pgTable('library_adoption_runs', {
   id: uuid('id').primaryKey().defaultRandom(),
   createdBy: uuid('created_by').notNull().references(() => users.id),

@@ -99,6 +99,13 @@
       "when": 1792472921928,
       "tag": "0013_material_sauron",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792551213965,
+      "tag": "0014_legacy_import_sessions",
+      "breakpoints": true
     }
   ]
 }

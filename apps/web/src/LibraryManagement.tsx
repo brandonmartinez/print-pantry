@@ -5,6 +5,7 @@ import { LibraryAdoption } from './LibraryAdoption.js';
 import { LibraryFileSize as FileSize, libraryByteLabel as byteLabel } from './LibraryFileSize.js';
 import { LegacyLibraryScan } from './LegacyLibraryScan.js';
 import { SourceDiscovery } from './SourceDiscovery.js';
+import { FolderInput } from 'lucide-react';
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 const errorMessage = (reason: unknown) => reason instanceof Error ? reason.message : 'Library management failed; retry shortly.';
@@ -262,9 +263,12 @@ export function LibraryManagement({ request }: { request: Request }) {
   return <main className="content-wrap library-management">
     <section className="requests-heading">
       <div><p className="eyebrow">Operator workspace</p><h1>Manage library</h1>
-        <p>Review catalog storage and preview adoption into ID-based managed folders. Categories and display metadata stay in the database.</p></div>
+        <p>Library storage and imports</p></div>
       <button className="button button-outline" type="button" disabled={busy || loading || planLoading} onClick={() => setRefresh((value) => value + 1)}>Refresh</button>
     </section>
+    <section className="legacy-management-entry"><div><h2>Import library</h2><p className="quiet">Legacy folders, project selection, and file organization.</p></div>
+      <Link className="button button-primary" to="/import-library"><FolderInput size={18} /> Import library</Link></section>
+    <details className="legacy-advanced" open={Boolean(planId) || undefined}><summary>Advanced migration tools</summary>
     <p className="notice">Generating a dry run saves a database snapshot only. No files are copied, renamed, deleted, or activated by a preview. Migration requires separate approval, copying, verification, and activation.</p>
     <LegacyLibraryScan request={request} refresh={refresh} onIndexed={refreshInventory} />
     <LibraryAdoption request={request} legacyCount={data?.summary.legacy} refresh={refresh} onStorageChanged={refreshInventory} />
@@ -337,5 +341,6 @@ export function LibraryManagement({ request }: { request: Request }) {
           <div><dt>Available storage bytes</dt><dd>{byteLabel(plan.availableBytes)}</dd></div></dl>
       </details>
     </section>}
+    </details>
   </main>;
 }

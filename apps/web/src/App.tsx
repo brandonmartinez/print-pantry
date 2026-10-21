@@ -4,6 +4,7 @@ import type { MeshGeometry, Point3D, Triangle } from './MeshViewer.js';
 import { ImportQueue } from './ImportQueue.js';
 import { SourceDiscovery } from './SourceDiscovery.js';
 import { LibraryManagement } from './LibraryManagement.js';
+import { LibraryImport } from './LibraryImport.js';
 
 type User = { id: string; username: string; role: 'operator' | 'member' | string };
 type RequestStatus = 'requested' | 'queued' | 'printing' | 'completed' | 'declined' | 'canceled' | string;
@@ -184,6 +185,7 @@ function unavailableSourceMessage(reason?: string | null): string {
     version_missing: 'The selected file version is no longer available.',
     version_not_current: 'The selected file version is no longer current or available.',
     migration_required: 'This project is not active in the managed library. Ask an operator to migrate and activate it.',
+    library_offline: 'Library storage is offline; the source cannot be checked right now.',
   };
   return messages[reason ?? ''] ?? 'One or more requested source files are no longer available.';
 }
@@ -1038,7 +1040,7 @@ function RoutedApp() {
   const navigate = useNavigate();
   const projectMatch = matchPath('/projects/:projectId', location.pathname);
   const selectedProjectId = projectMatch?.params.projectId ?? null;
-  const activeView = location.pathname === '/manage-library' ? 'management' : location.pathname === '/imports' ? 'imports' : location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
+  const activeView = location.pathname === '/import-library' ? 'library-import' : location.pathname === '/manage-library' ? 'management' : location.pathname === '/imports' ? 'imports' : location.pathname === '/requests' || location.pathname === '/queue' ? 'requests' : 'library';
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
@@ -1049,10 +1051,10 @@ function RoutedApp() {
   const [category, setCategory] = useState('');
   const [fileType, setFileType] = useState('');
   const [page, setPage] = useState(1);
-  const [catalogRefresh, setCatalogRefresh] = useState(0);
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState('');
+  const [catalogRefresh, setCatalogRefresh] = useState(0);
   const catalogEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1074,7 +1076,7 @@ function RoutedApp() {
   }, []);
 
   useEffect(() => {
-    const knownPath = location.pathname === '/' || location.pathname === '/requests' || location.pathname === '/queue' || location.pathname === '/imports' || location.pathname === '/manage-library'
+    const knownPath = location.pathname === '/' || location.pathname === '/requests' || location.pathname === '/queue' || location.pathname === '/imports' || location.pathname === '/manage-library' || location.pathname === '/import-library'
       || Boolean(projectMatch);
     if (!knownPath) navigate('/', { replace: true });
   }, [location.pathname, navigate, projectMatch]);
@@ -1202,7 +1204,9 @@ function RoutedApp() {
       {authError && <div className="global-notice notice-error" role="alert">{authError}</div>}
       {connectionError && <div className="global-notice notice-error" role="alert">{connectionError}</div>}
 
-      {activeView === 'management'
+      {activeView === 'library-import'
+        ? user.role === 'operator' ? <main className="content-wrap"><LibraryImport request={apiRequest} /></main> : <main className="content-wrap"><p className="notice notice-error" role="alert">Library import requires operator access.</p><Link to="/">Back to library</Link></main>
+        : activeView === 'management'
         ? user.role === 'operator' ? <LibraryManagement request={apiRequest} /> : <main className="content-wrap"><p className="notice notice-error" role="alert">Library management requires operator access.</p><Link to="/">Back to library</Link></main>
         : activeView === 'imports'
         ? <ImportQueue user={user} />

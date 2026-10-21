@@ -10,6 +10,7 @@ import { registerSourceDiscovery } from './source-discovery.js';
 import { registerLibraryManagement } from './library-management.js';
 import { libraryMigrationForPlan, registerLibraryMigrations } from './library-migrations.js';
 import { registerLibraryAdoption } from './library-adoption.js';
+import { registerLegacyImports } from './library-import.js';
 
 export function buildServer(
   pool: { query(sql: string): Promise<unknown> },
@@ -51,6 +52,8 @@ export function buildServer(
     registerLibraryManagement(server, catalog.pool, auth, catalog, (id) => libraryMigrationForPlan(catalog.pool, id));
     registerLibraryMigrations(server, catalog.pool, auth, catalog);
     registerLibraryAdoption(server, catalog.pool, auth, catalog);
+    registerLegacyImports(server, catalog.pool, auth, { root: catalog.root, importStorage: catalog.importStorage,
+      ignoredDirectories: (process.env.LEGACY_LIBRARY_IGNORED_DIRS ?? '').split(',').map((name) => name.trim()).filter(Boolean) });
   }
 
   return server;

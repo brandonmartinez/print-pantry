@@ -15,6 +15,7 @@ const appTables = new Set([
   'library_reorganization_plans',
   'library_migrations', 'library_migration_projects',
   'library_adoption_runs', 'library_adoption_items',
+  'legacy_import_sessions',
 ]);
 
 export async function runMigrations(connectionString: string, migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.url))) {

@@ -39,8 +39,8 @@ account-provisioning command if you do not already have one.
    all associated submissions. Operator decision notes are shared with the
    people following that import; private requester notes are not copied into
    published project metadata.
-13. Browse an existing legacy project and exercise its preview/download and
-    normal print-request flow. Its files and physical layout must be unchanged.
+13. Verify legacy-only projects remain unavailable in the live catalog until
+   separately activated. Legacy files and physical layout stay unchanged.
 
 Useful example:
 
@@ -63,6 +63,84 @@ cannot create separate active imports for the same identity. Repeat network
 submissions reuse a per-payload idempotency key, retaining notes only once.
 An operator cancel/decline closes the shared import for everyone; requesters
 cannot close another person's work by canceling a shared record.
+
+## Guided legacy library import
+
+Open **Manage library > Import library** (`/import-library`) as an operator.
+Configure separate `LEGACY_LIBRARY_ROOT`, `IMPORT_STORAGE_ROOT`, and
+`MANAGED_LIBRARY_ROOT` directories. No catalog scan is required. Opening the
+page lists recent sessions; **Browse folders** explicitly starts discovery.
+
+1. Expand/search the tree and select project roots. A checked folder is one
+   project including all its descendants. Suggestions are optional. Roots cannot
+   overlap; replacing selected children with a parent requires confirmation.
+2. Choose **Standardize** or **Keep layout**, then **Review organization**.
+   Ancestor folders propose editable categories without assuming fixed depth.
+   Independent files get readable names and deterministic format folders.
+   Linked model/texture and HTML resources retain relative names/layout together;
+   unsafe linked names block preparation rather than breaking references.
+3. Edit names, categories, and independent destination paths. Expand **Files**
+   for original/proposed mappings. Save project edits before preparation.
+4. Choose **Prepare files**. The worker retains and hash-verifies each project's
+   originals and recovery manifest before creating its organized copy. Reload
+   the saved `?session=...` URL to resume or observe progress.
+
+**Files organized** is the stopping point: this flow does not create live
+catalog entries or managed projects. AI, publication, and activation are not
+implemented here. Advanced adoption remains separate and does not consume these
+organized staging copies. No original files are changed or automatically purged.
+
+Discovery limits: 20,000 entries, 10,000 files, 24 levels. Batch limits: 100
+project roots, 20 GiB of selected bytes. Destination paths also obey intake
+portability limits (12 components, 700 characters, 200 bytes per component).
+Unselected files stay outside the batch. Symlinks/special entries are never
+followed. OS metadata and `LEGACY_LIBRARY_IGNORED_DIRS` are excluded.
+
+Recovery is outside the live library, under `IMPORT_STORAGE_ROOT`:
+
+```text
+legacy-imports/<session-id>/
+  originals/<project-key>/<file-id>
+  recovery/<project-key>.json
+  organized/<project-key>/<reviewed-relative-path>
+```
+
+The versioned manifest records original relative names, directories (including
+empty directories), proposed metadata/paths, sizes/hashes, source fingerprint,
+and any matching legacy catalog project rows. Original bytes use opaque IDs;
+reconstruct the original tree from this mapping, not organized filenames.
+Keep-layout staging recreates empty directories too. Retained copies are not
+an independent backup: back up intake and PostgreSQL together.
+
+The worker processes one project per tick under a per-session database lock
+and resumes persisted queued work after restart. Changed source/storage identity
+blocks preparation; start a new session for a changed inventory. Correct a
+retryable storage failure and choose **Retry preparation**. Existing files are
+never overwritten; conflicting bytes stop the operation. Retain recovery/staging
+data when investigating failures. There are no pause/cancel controls yet;
+queued preparation continues server-side after navigation.
+
+### Shared operator API
+
+All routes require an authenticated operator cookie, including agent clients.
+Browser calls use `/api`; direct Fastify calls omit that prefix. Bodies are
+strict JSON objects; no endpoint accepts arbitrary host roots.
+
+| Method and path | Body / result |
+| --- | --- |
+| `GET /api/library/imports` | Configuration status and latest 10 session summaries |
+| `POST /api/library/imports` | `{id: UUID}`; idempotent discovery creation |
+| `GET /api/library/imports/:id` | Saved tree, selection, projects, state, revision |
+| `POST /api/library/imports/:id/selection` | `{expectedRevision, roots: string[], layout: "standardize" or "preserve"}` |
+| `POST /api/library/imports/:id/plan` | `{expectedRevision}`; deterministic review plan |
+| `POST /api/library/imports/:id/edit` | `{expectedRevision, key: UUID, name, category: string or null, paths: [{id: UUID, path}]}` |
+| `POST /api/library/imports/:id/organize` | `{expectedRevision}`; queue verified recovery/organization |
+
+Use each response's revision in the next command; stale updates return 409.
+Root paths/file IDs must come from the saved discovery/plan. An empty root
+string selects the entire configured source as one project, not a host path.
+Changing selection clears the plan. Prepared sessions are immutable. Public
+responses expose relative paths, not configured host-storage paths.
 
 ## Storage and organization
 
