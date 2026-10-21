@@ -298,6 +298,40 @@ never during image build. Local `npm ci` uses your configured registry; the
 lockfile has no registry-specific tarball URLs. GitHub-hosted CI uses the
 runner's configured registry, not your machine's private config.
 
+### Local storage rehearsal
+
+To rehearse NAS-style storage without accessing the NAS or your original library,
+create three separate directories on the **Docker host** and configure ignored
+`.env` with their absolute paths:
+
+```dotenv
+DEV_POSTGRES_HOST_PATH=/absolute/dev-storage/db
+LEGACY_LIBRARY_HOST_PATH=/absolute/dev-storage/legacy-library
+MANAGED_LIBRARY_HOST_PATH=/absolute/dev-storage/managed-library
+```
+
+Put copies of sample projects in `legacy-library`; Compose mounts it read-only.
+Keep the managed destination separate and initially empty. `db` is PostgreSQL
+17's private data directory, not a SQL dump folder; do not place project files
+there. Use a local filesystem for database data, not an SMB-mounted share.
+When `DEV_POSTGRES_HOST_PATH` is blank, development retains its existing
+`pantry_pg_data` named-volume behavior. This setting does not affect production.
+
+Recreate/reopen the dev container after changing paths. An empty database
+directory initializes fresh development and test databases; it does **not**
+transfer accounts or data from the previous volume. The old volume remains
+untouched. `npm run dev` applies migrations and seeds the development account
+as described above. Tests still target the separate `print_pantry_test` database.
+Uploads remain in workspace `.pantry-data/intake`, outside these three folders.
+
+For a reversible filesystem checkpoint, stop the app **and PostgreSQL** before
+copying database data. Capture the database, managed library, and intake storage
+together so catalog records and retained files stay consistent; retain the same
+legacy sample files too. Restore only while the services are stopped and use the
+same PostgreSQL major version. Do not copy or replace a live PostgreSQL data
+directory. These local folders test the layout, not actual NAS mount or network
+failure behavior.
+
 The host Git config defaults to `$HOME/.gitconfig`; set `HOST_GIT_CONFIG_FILE`
 in `.env` if you use another location, such as `$HOME/.config/git/config`.
 Compose requires an existing regular file and mounts it **read-only** at

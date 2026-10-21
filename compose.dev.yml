@@ -58,7 +58,7 @@ services:
       POSTGRES_PASSWORD: development-only
       POSTGRES_DB: print_pantry_dev
     volumes:
-      - pantry_pg_data:/var/lib/postgresql/data
+      - ${DEV_POSTGRES_HOST_PATH:-pantry_pg_data}:/var/lib/postgresql/data
       - ./.devcontainer/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pantry -d print_pantry_dev"]
